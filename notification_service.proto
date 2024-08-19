@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+option go_package = "github.com/sss/notifications";
+
+import "google/protobuf/empty.proto";
+
+service NotificationDelegateService {
+  rpc SendNotification (HelloRequest) returns (google.protobuf.Empty) {}
+}
+
+message HelloRequest {
+  string name = 1;
+}
