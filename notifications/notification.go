@@ -1,9 +1,27 @@
 package notifications
 
 import (
+	"context"
+	"fmt"
 	"log"
+	"net"
 	"net/smtp"
+
+	notif "github.com/sss/notifications"
+
+	grpc "google.golang.org/grpc"
+	"google.golang.org/protobuf/types/known/emptypb"
 )
+
+type Server struct {
+	notif.UnimplementedNotificationDelegateServiceServer
+}
+
+func (s *Server) SendNotification(ctx context.Context, in *notif.HelloRequest) (*emptypb.Empty, error) {
+	log.Printf("Received: %v", in.GetName())
+	// send to all receivers
+	return &emptypb.Empty{}, nil
+}
 
 func sendEmail() {
 	//  https://myaccount.google.com/apppasswords
@@ -24,4 +42,29 @@ func sendEmail() {
 	if err != nil {
 		log.Fatal(err)
 	}
+}
+
+func main() {
+	log.SetFlags(log.LstdFlags | log.Lmsgprefix | log.LUTC)
+	log.SetPrefix("[debug] ")
+
+	// TODO: use a secure connection
+	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", 50051))
+	if err != nil {
+		log.Fatalf("failed to listen: %v", err)
+	}
+
+	s := grpc.NewServer()
+	notif.RegisterNotificationDelegateServiceServer(s, &Server{})
+	log.Printf("server listening at %v", lis.Addr())
+
+	go func() {
+		if err := s.Serve(lis); err != nil {
+			log.Fatalf("failed to serve: %v", err)
+		}
+	}()
+
+	// wait on signal
+
+	s.GracefulStop()
 }
