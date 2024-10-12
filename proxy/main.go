@@ -18,6 +18,12 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 )
 
 type CameraEndpoint struct {
@@ -48,6 +54,9 @@ func addCamera(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "server error", 500)
 		return
 	}
+
+	// should this be here or in a different service?
+	createSts("<camera RTSP url>")
 
 	ordinalIdx := string(hostname)[bytes.LastIndexByte(hostname, '-')+1:]
 
@@ -167,6 +176,81 @@ func getReplicaSetInstances() (int, error) {
 	return replicaSet.Status.Replicas, nil
 }
 
+func createSts(cameraUrl string) {
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		log.Fatalf("Failed to load in-cluster config: %v", err)
+	}
+
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		log.Fatalf("Failed to create clientset: %v", err)
+	}
+
+	statefulSet := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "example-statefulset",
+			Namespace: "default",
+		},
+		Spec: appsv1.StatefulSetSpec{
+			Replicas:    int32Ptr(1),
+			ServiceName: "analyser-service",
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					"app": "analyser",
+				},
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						"app": "analyser",
+					},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "nginx",
+							Image: "nginx:1.19",
+							Ports: []corev1.ContainerPort{
+								{
+									ContainerPort: 80,
+								},
+							},
+							Args: []string{
+								cameraUrl,
+								"behaviour",
+							},
+							Env: []corev1.EnvVar{
+								{
+									Name:  "NOTIFICATION_SERVICE_URL",
+									Value: "notif-service.k8s.internal:9090",
+								},
+								{
+									Name:  "PYTHONUNBUFFERED",
+									Value: "1",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	statefulSetsClient := clientset.AppsV1().StatefulSets("default")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	result, err := statefulSetsClient.Create(ctx, statefulSet, metav1.CreateOptions{})
+	if err != nil {
+		log.Fatalf("Failed to create StatefulSet: %v", err)
+	}
+
+	fmt.Printf("Created StatefulSet %q.\n", result.GetObjectMeta().GetName())
+}
+
+func int32Ptr(i int32) *int32 { return &i }
+
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix | log.LUTC)
 	log.SetPrefix("[debug] ")
@@ -184,7 +268,7 @@ func main() {
 	router.Get("/cameras/{path}", getEndpointEncodings)
 
 	server := &http.Server{
-		Addr:              ":8088",
+		Addr:              ":8080",
 		Handler:           router,
 		ReadTimeout:       5 * time.Second,
 		ReadHeaderTimeout: 2 * time.Second,
