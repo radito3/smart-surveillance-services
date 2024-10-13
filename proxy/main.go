@@ -219,15 +219,20 @@ func createSts(cameraUrl string) {
 							Args: []string{
 								cameraUrl,
 								"behaviour",
+								"notif-service.k8s.internal:9090",
 							},
 							Env: []corev1.EnvVar{
 								{
-									Name:  "NOTIFICATION_SERVICE_URL",
-									Value: "notif-service.k8s.internal:9090",
+									Name:  "ACTIVITY_WHITELIST",
+									Value: "1-30",
 								},
 								{
 									Name:  "PYTHONUNBUFFERED",
 									Value: "1",
+								},
+								{
+									Name:  "LOG_LEVEL",
+									Value: "DEBUG",
 								},
 							},
 						},
