@@ -219,7 +219,8 @@ func createSts(cameraUrl string) {
 							Args: []string{
 								cameraUrl,
 								"behaviour",
-								"notif-service.k8s.internal:9090",
+								// the camera ID should be part of the notification webhook URL
+								"notif-service.k8s.internal:9090/camera/1",
 							},
 							Env: []corev1.EnvVar{
 								{
