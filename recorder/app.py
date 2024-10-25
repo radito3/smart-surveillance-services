@@ -1,4 +1,5 @@
 import cv2
+import sys
 import numpy as np
 
 
@@ -10,18 +11,18 @@ def compare_frames(frame1, frame2, threshold=30):
     return non_zero_count > 0
 
 
-def process_video(input_path, output_path, idle_time=300, low_fps=1, high_fps=24):
-    """
-    this will be a pre-processing filter when recording video streams to GCS/k8s Storage class/persistent volume
-    and there will be a cron job that will periodically merge file parts (and maybe compress them)
-    """
-    cap = cv2.VideoCapture(input_path)
+def process_video(video_url: str, recoding_dir: str, idle_time: int = 30, low_fps: int = 1, high_fps: int = 24):
+    cap = cv2.VideoCapture(video_url)
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(output_path, fourcc, high_fps, (width, height))
 
-    frame_count = 0
+    # TODO: if this script fails and is restarted, check the highest index of video file currently present and overwrite it
+    current_segment = 0
+    path_template = recoding_dir + "recording_{0}.mp4"
+
+    out = cv2.VideoWriter(path_template.format(current_segment), fourcc, high_fps, (width, height))
+
     idle_frames = 0
     current_fps = high_fps
 
@@ -39,16 +40,23 @@ def process_video(input_path, output_path, idle_time=300, low_fps=1, high_fps=24
             idle_frames = 0
             if current_fps != high_fps:
                 current_fps = high_fps
-                out = cv2.VideoWriter(output_path, fourcc, high_fps, (width, height))
+                out.release()
+                current_segment += 1
+                out = cv2.VideoWriter(path_template.format(current_segment), fourcc, high_fps, (width, height))
         else:
             idle_frames += 1
             if idle_frames >= idle_time * current_fps:
                 current_fps = low_fps
-                out = cv2.VideoWriter(output_path, fourcc, low_fps, (width, height))
+                out.release()
+                current_segment += 1
+                out = cv2.VideoWriter(path_template.format(current_segment), fourcc, low_fps, (width, height))
 
         out.write(frame)
         prev_frame = frame
-        frame_count += 1
 
     cap.release()
     out.release()
+
+if __name__ == "__main__":
+    video_url = sys.argv[1]
+    process_video(video_url, "/app")
