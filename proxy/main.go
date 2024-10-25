@@ -62,7 +62,25 @@ func addCamera(w http.ResponseWriter, r *http.Request) {
 
 	// create a path config on the current instance
 	_ = ordinalIdx
+
+	// TODO: have a button in the UI when adding a camera for enabling Adaptive Bitrate Streaming for HLS
+	//  as it is computationally expensive, do not include it by default
+	/*
+		runOnPublish: |
+			ffmpeg -i rtsp://localhost:8554/{path} -map 0:v -map 0:a \
+			-b:v:0 500k -maxrate:v:0 500k -bufsize:v:0 1000k -s:v:0 640x360 -c:v:0 libx264 \
+			-b:v:1 1000k -maxrate:v:1 1000k -bufsize:v:1 2000k -s:v:1 1280x720 -c:v:1 libx264 \
+			-b:v:2 2000k -maxrate:v:2 2000k -bufsize:v:2 4000k -s:v:2 1920x1080 -c:v:2 libx264 \
+			-c:a aac -b:a 128k -f hls -hls_time 4 -hls_list_size 5 \
+			-var_stream_map "v:0,a:0 v:1,a:1 v:2,a:2" \
+			-master_pl_name master.m3u8 \
+			-hls_segment_filename /{path}/stream_%v/segment_%d.ts \
+			/{path}/stream_%v/playlist.m3u8
+		runOnPublishRestart: yes
+	*/
+	// TODO: support only [rtsp, rtmp, hls, webrtc]
 	cameraPayload := strings.NewReader("{\"a\":\"test\"}")
+
 	res, err := http.Post("http://localhost:9997/v3/config/paths/add/{path}", "application/json", cameraPayload)
 	if err != nil {
 		http.Error(w, "server error", 500)
@@ -96,19 +114,7 @@ func getEndpoints(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 
-	writer.WriteHeader(200)
-}
-
-func getEndpointEncodings(writer http.ResponseWriter, request *http.Request) {
-	path := chi.URLParam(request, "path")
-
-	res, err := http.Get("http://localhost:9997/v3/paths/get/" + path)
-	if err != nil {
-		http.Error(writer, "server error", 500)
-		return
-	}
-
-	defer res.Body.Close()
+	// TODO: write endpoints to response
 
 	writer.WriteHeader(200)
 }
@@ -176,6 +182,7 @@ func getReplicaSetInstances() (int, error) {
 	return replicaSet.Status.Replicas, nil
 }
 
+// TODO: do not use log.Fatal, just return an error
 func createSts(cameraUrl string) {
 	config, err := rest.InClusterConfig()
 	if err != nil {
@@ -271,10 +278,9 @@ func main() {
 
 	router.Post("/cameras", addCamera)
 	router.Get("/cameras", getEndpoints)
-	router.Get("/cameras/{path}", getEndpointEncodings)
 
 	server := &http.Server{
-		Addr:              ":8080",
+		Addr:              ":80",
 		Handler:           router,
 		ReadTimeout:       5 * time.Second,
 		ReadHeaderTimeout: 2 * time.Second,
