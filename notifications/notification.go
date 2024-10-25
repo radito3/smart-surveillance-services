@@ -4,25 +4,38 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"net"
+	"net/http"
 	"net/smtp"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
-	notif "github.com/sss/notifications"
-
-	grpc "google.golang.org/grpc"
-	"google.golang.org/protobuf/types/known/emptypb"
+	"github.com/go-chi/chi"
+	"github.com/go-chi/chi/middleware"
 )
 
-type Server struct {
-	notif.UnimplementedNotificationDelegateServiceServer
+type ReceiverConfig struct {
+	UIPopup       bool   `json:"ui_popup,omitempty"`
+	SmtpServer    string `json:"smtp_server,omitempty"`
+	SmtpRecipient string
+	// ...
 }
 
-func (s *Server) SendNotification(ctx context.Context, in *notif.HelloRequest) (*emptypb.Empty, error) {
-	log.Printf("Received: %v", in.GetName())
-	// send to all receivers
-	return &emptypb.Empty{}, nil
+var receivers map[string][]ReceiverConfig = make(map[string][]ReceiverConfig)
+
+func createReceiver(w http.ResponseWriter, r *http.Request) {
+	// TODO: read from request body the type of receivers
+	// the camera ID will be in the path
 }
 
+func sendNotification(w http.ResponseWriter, r *http.Request) {
+	log.Printf("received alert signal from {camera ID}")
+	// TODO: send to all receivers
+	_ = receivers["a"]
+}
+
+// TODO: do not bother with a full mailing implementation, just write about it in the thesis paper
 func sendEmail() {
 	//  https://myaccount.google.com/apppasswords
 	//  Navigate to App Password Generator, designate an app name such as "security project," and obtain a 16-digit password.
@@ -40,7 +53,7 @@ func sendEmail() {
 	err := smtp.SendMail("smtp.gmail.com:587", auth, "john.doe@gmail.com", to, msg)
 
 	if err != nil {
-		log.Fatal(err)
+		log.Println(err)
 	}
 }
 
@@ -48,23 +61,46 @@ func main() {
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix | log.LUTC)
 	log.SetPrefix("[debug] ")
 
-	// TODO: use a secure connection
-	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", 50051))
-	if err != nil {
-		log.Fatalf("failed to listen: %v", err)
-	}
+	log.Println("configuring server...")
 
-	s := grpc.NewServer()
-	notif.RegisterNotificationDelegateServiceServer(s, &Server{})
-	log.Printf("server listening at %v", lis.Addr())
+	router := chi.NewRouter()
+
+	router.Use(middleware.Recoverer)
+	router.Use(middleware.CleanPath)
+	router.Use(middleware.Heartbeat("/public/ping"))
+
+	router.Post("/add/{cameraID}", sendNotification)
+	router.Post("/alert", sendNotification)
+
+	server := &http.Server{
+		Addr:              ":80",
+		Handler:           router,
+		ReadTimeout:       5 * time.Second,
+		ReadHeaderTimeout: 2 * time.Second,
+		WriteTimeout:      10 * time.Second,
+	}
+	server.SetKeepAlivesEnabled(false)
 
 	go func() {
-		if err := s.Serve(lis); err != nil {
-			log.Fatalf("failed to serve: %v", err)
+		log.Println("starting server...")
+		// TODO: make an self-signed SSL certificate
+		err := server.ListenAndServe()
+		if err != nil && err != http.ErrServerClosed {
+			fmt.Fprintln(os.Stderr, err.Error())
 		}
 	}()
 
-	// wait on signal
+	signalChan := make(chan os.Signal, 1)
+	signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
 
-	s.GracefulStop()
+	<-signalChan
+
+	ctx, done := context.WithTimeout(context.Background(), 5*time.Second)
+	defer done()
+
+	log.Println("shutting down server...")
+	err := server.Shutdown(ctx)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
+	}
 }
