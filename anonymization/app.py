@@ -9,8 +9,7 @@ from face_anon_filter import FaceAnonymizer
 
 
 processor = FaceAnonymizer()
-# TODO: extract from env
-width, height = 1920, 1080
+width, height = os.environ['DIMS'].split('x')
 
 while True:
     in_bytes = sys.stdin.buffer.read(width * height * 3)
