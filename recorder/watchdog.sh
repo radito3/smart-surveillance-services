@@ -1,6 +1,6 @@
 #!/bin/bash
 
-WATCH_DIR="/app"
+WATCH_DIR=$(pwd)
 LOG_FILE="${WATCH_DIR}/file_log.txt"
 
 touch "$LOG_FILE"

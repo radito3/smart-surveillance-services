@@ -1,3 +1,4 @@
+import logging
 import cv2
 import sys
 import numpy as np
@@ -58,5 +59,9 @@ def process_video(video_url: str, recoding_dir: str, idle_time: int = 30, low_fp
     out.release()
 
 if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        logging.error("Invalid arguments. Required <VIDEO_URL>")
+        sys.exit(1)
+
     video_url = sys.argv[1]
     process_video(video_url, "/app")
