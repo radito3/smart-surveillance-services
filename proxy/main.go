@@ -33,14 +33,6 @@ type CameraEndpoint struct {
 	SourceOnDemand bool   `json:"source_on_demand"`
 }
 
-type ReplicaSetStatus struct {
-	Replicas int `json:"replicas"`
-}
-
-type ReplicaSet struct {
-	Status ReplicaSetStatus `json:"status"`
-}
-
 func addCamera(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
