@@ -11,7 +11,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
-	"strings"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -25,25 +25,41 @@ import (
 	"k8s.io/client-go/rest"
 )
 
-type CameraEndpoint struct {
-	ID             string `json:"ID"`
-	Source         string `json:"source"`
-	MaxReaders     int64  `json:"maxReaders"`
-	Fallback       string `json:"fallback,omitempty"`
-	SourceOnDemand bool   `json:"source_on_demand"`
+type CameraEndpointRequest struct {
+	ID                string `json:"ID"`
+	AnalysisMode      string `json:"analysisMode"`
+	Source            string `json:"source"`
+	EnableTranscoding bool   `json:"enableTranscoding,omitempty"`
+	MaxReaders        int64  `json:"maxReaders,omitempty"`
+}
+
+type CameraEndpointConfig struct {
+	Path                string `json:"name"`
+	Source              string `json:"source,omitempty"`
+	SourceRedirect      string `json:"sourceRedirect,omitempty"`
+	MaxReaders          int64  `json:"maxReaders,omitempty"`
+	RunOnPublish        string `json:"runOnPublish,omitempty"`
+	RunOnPublishRestart bool   `json:"runOnPublishRestart,omitempty"`
 }
 
 func addCamera(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
-	var data CameraEndpoint
+	var data CameraEndpointRequest
 	err := json.NewDecoder(r.Body).Decode(&data)
 	if err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
 
-	totalInstances, err := getDeploymentInstances()
+	// TODO: ignore 409 Conflict, as the camera endpoint may already be created
+	err = createMlPipelineDeployment(data.Source, data.AnalysisMode, data.ID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	totalInstances, err := getStatefulSetInstances()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -51,67 +67,89 @@ func addCamera(w http.ResponseWriter, r *http.Request) {
 
 	hostname, err := os.ReadFile("/etc/hostname")
 	if err != nil {
-		http.Error(w, fmt.Sprintf("could not read hostname: %v", err), http.StatusBadRequest)
+		http.Error(w, fmt.Sprintf("could not read hostname: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	err = createSts(data.Source)
+	currentInstanceIdxStr := string(hostname)[bytes.LastIndexByte(hostname, '-')+1:]
+	currentInstanceIdx, _ := strconv.Atoi(currentInstanceIdxStr)
+
+	var config CameraEndpointConfig
+	config.Path = "camera-" + url.PathEscape(data.ID)
+	config.MaxReaders = data.MaxReaders
+	config.Source = data.Source
+	if data.EnableTranscoding {
+		config.RunOnPublishRestart = true
+		config.RunOnPublish = "ffmpeg -i rtsp://localhost:8554/" + config.Path + " -map 0:v -map 0:a " +
+			"-b:v:0 500k -maxrate:v:0 500k -bufsize:v:0 1000k -s:v:0 640x360 -c:v:0 libx264 " +
+			"-b:v:1 1000k -maxrate:v:1 1000k -bufsize:v:1 2000k -s:v:1 1280x720 -c:v:1 libx264 " +
+			"-b:v:2 2000k -maxrate:v:2 2000k -bufsize:v:2 4000k -s:v:2 1920x1080 -c:v:2 libx264 " +
+			"-c:a aac -b:a 128k -f hls -hls_time 4 -hls_list_size 5 " +
+			"-var_stream_map \"v:0,a:0 v:1,a:1 v:2,a:2\" " +
+			"-master_pl_name master.m3u8 " +
+			"-hls_segment_filename /" + config.Path + "/stream_%v/segment_%d.ts " +
+			"/" + config.Path + "/stream_%v/playlist.m3u8"
+	}
+
+	err = sendConfigRequest(config, "localhost")
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	ordinalIdx := string(hostname)[bytes.LastIndexByte(hostname, '-')+1:]
+	for i := 0; i < int(totalInstances); i++ {
+		if i != currentInstanceIdx {
+			config.Source = ""
+			config.RunOnPublishRestart = false
+			config.RunOnPublish = ""
+			// TODO: extract protocol and port
+			config.SourceRedirect = "<protocol>://" + string(hostname) + ":<port>/" + config.Path
 
-	// create a path config on the current instance
-	_ = ordinalIdx
+			// TODO: change the hostname ordinal index to i
+			err = sendConfigRequest(config, string(hostname))
+			if err != nil {
+				// should we stop or continue here?
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+	}
 
-	// TODO: have a button in the UI when adding a camera for enabling Adaptive Bitrate Streaming for HLS
-	//  as it is computationally expensive, do not include it by default
-	/*
-		runOnPublish: |
-			ffmpeg -i rtsp://localhost:8554/{path} -map 0:v -map 0:a \
-			-b:v:0 500k -maxrate:v:0 500k -bufsize:v:0 1000k -s:v:0 640x360 -c:v:0 libx264 \
-			-b:v:1 1000k -maxrate:v:1 1000k -bufsize:v:1 2000k -s:v:1 1280x720 -c:v:1 libx264 \
-			-b:v:2 2000k -maxrate:v:2 2000k -bufsize:v:2 4000k -s:v:2 1920x1080 -c:v:2 libx264 \
-			-c:a aac -b:a 128k -f hls -hls_time 4 -hls_list_size 5 \
-			-var_stream_map "v:0,a:0 v:1,a:1 v:2,a:2" \
-			-master_pl_name master.m3u8 \
-			-hls_segment_filename /{path}/stream_%v/segment_%d.ts \
-			/{path}/stream_%v/playlist.m3u8
-		runOnPublishRestart: yes
-	*/
-	// TODO: support only [rtsp, rtmp, hls, webrtc]
-	cameraPayload := strings.NewReader("{\"a\":\"test\"}")
+	w.WriteHeader(http.StatusOK)
+}
 
-	res, err := http.Post("http://localhost:9997/v3/config/paths/add/{path}", "application/json", cameraPayload)
+func sendConfigRequest(config CameraEndpointConfig, host string) error {
+	cameraPayload, err := json.Marshal(config)
 	if err != nil {
-		http.Error(w, "server error", 500)
-		return
+		return fmt.Errorf("could not serialize config request: %v", err)
+	}
+
+	res, err := http.Post("http://"+host+":9997/v3/config/paths/add/"+config.Path, "application/json", bytes.NewReader(cameraPayload))
+	if err != nil {
+		return fmt.Errorf("could not send config request: %v", err)
 	}
 	defer res.Body.Close()
 
+	// TODO: handle the case where the camera endpoint is already created
 	if res.StatusCode/100 != 2 {
-		w.WriteHeader(res.StatusCode)
-		return
+		// w.WriteHeader(res.StatusCode)
+		// w.Write(res.Body)
+		return nil
 	}
-
-	// TODO: create redirect paths in the rest of the instaces
-	_ = totalInstances
-
-	w.WriteHeader(200)
+	return nil
 }
 
 func getEndpoints(writer http.ResponseWriter, request *http.Request) {
-	addr, _ := url.ParseRequestURI("http://localhost:9997/v3/paths")
+	// this will not be the full config, just a summary
+	addr, _ := url.ParseRequestURI("http://localhost:9997/v3/paths/list")
 
 	proxy := httputil.NewSingleHostReverseProxy(addr)
 
 	proxy.ServeHTTP(writer, request)
 }
 
-func getDeploymentInstances() (int32, error) {
-	deploymentName := "mediamtx"
+func getStatefulSetInstances() (int32, error) {
+	statefulSet := "mediamtx"
 	config, err := rest.InClusterConfig()
 	if err != nil {
 		return -1, fmt.Errorf("failed to load in-cluster config: %v", err)
@@ -122,19 +160,19 @@ func getDeploymentInstances() (int32, error) {
 		return -1, fmt.Errorf("failed to create k8s client: %v", err)
 	}
 
-	deploymentsClient := clientset.AppsV1().Deployments("hub")
+	statefulSetsClient := clientset.AppsV1().StatefulSets("hub")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	deployment, err := deploymentsClient.Get(ctx, deploymentName, metav1.GetOptions{})
+	sts, err := statefulSetsClient.Get(ctx, statefulSet, metav1.GetOptions{})
 	if err != nil {
-		return -1, fmt.Errorf("could not get Deployment %s: %v", deploymentName, err)
+		return -1, fmt.Errorf("could not get StatefulSet %s: %v", statefulSet, err)
 	}
 
-	return deployment.Status.Replicas, nil
+	return sts.Status.Replicas, nil
 }
 
-func createSts(cameraUrl string) error {
+func createMlPipelineDeployment(cameraUrl, analysisMode, cameraID string) error {
 	config, err := rest.InClusterConfig()
 	if err != nil {
 		return fmt.Errorf("failed to load in-cluster config: %v", err)
@@ -145,14 +183,13 @@ func createSts(cameraUrl string) error {
 		return fmt.Errorf("failed to create k8s client: %v", err)
 	}
 
-	statefulSet := &appsv1.StatefulSet{
+	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "ml-pipeline-{Camera_ID}",
+			Name:      "ml-pipeline-" + cameraID,
 			Namespace: "ml-analysis",
 		},
-		Spec: appsv1.StatefulSetSpec{
-			Replicas:    int32Ptr(1),
-			ServiceName: "analyser-service",
+		Spec: appsv1.DeploymentSpec{
+			Replicas: int32Ptr(1),
 			Selector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{
 					"app": "analyser",
@@ -167,19 +204,12 @@ func createSts(cameraUrl string) error {
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{
-							// TODO: update name and image
-							Name:  "nginx",
-							Image: "nginx:1.19",
-							Ports: []corev1.ContainerPort{
-								{
-									ContainerPort: 8080,
-								},
-							},
+							Name:  "ml-pipeline",
+							Image: "python:3.12-bookworm", // TODO: build a custom image
 							Args: []string{
 								cameraUrl,
-								"behaviour",
-								// the camera ID should be part of the notification webhook URL
-								"notif-service.k8s.internal:8080/camera/1",
+								analysisMode,
+								"notif-service.k8s.internal:8080/alert/" + cameraID,
 							},
 							Env: []corev1.EnvVar{
 								{
@@ -202,16 +232,16 @@ func createSts(cameraUrl string) error {
 		},
 	}
 
-	statefulSetsClient := clientset.AppsV1().StatefulSets("ml-analysis")
+	deplomentsClient := clientset.AppsV1().Deployments("ml-analysis")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	result, err := statefulSetsClient.Create(ctx, statefulSet, metav1.CreateOptions{})
+	result, err := deplomentsClient.Create(ctx, deployment, metav1.CreateOptions{})
 	if err != nil {
-		return fmt.Errorf("failed to create StatefulSet: %v", err)
+		return fmt.Errorf("failed to create Deployment: %v", err)
 	}
 
-	fmt.Printf("Created StatefulSet %q\n", result.GetObjectMeta().GetName())
+	fmt.Printf("Created Deployment %q\n", result.GetObjectMeta().GetName())
 	return nil
 }
 
