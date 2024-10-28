@@ -107,7 +107,7 @@ func addCamera(writer http.ResponseWriter, request *http.Request) {
 			config.Source = ""
 			config.RunOnPublishRestart = false
 			config.RunOnPublish = ""
-			config.SourceRedirect = parsedSourceURL.Scheme + "://" + string(hostname) + ":" + parsedSourceURL.Port() + "/" + config.Path
+			config.SourceRedirect = parsedSourceURL.Scheme + "://" + string(hostname) + ".mediamtx:" + parsedSourceURL.Port() + "/" + config.Path
 
 			err = sendConfigRequest(config, changeHostnameSuffix(string(hostname), i))
 			if err != nil {
@@ -149,7 +149,7 @@ func changeHostnameSuffix(hostname string, newSuffix int) string {
 	matches := re.FindStringSubmatch(hostname)
 
 	newHostname := matches[1] + strconv.Itoa(newSuffix)
-	return fmt.Sprintf("%s.mediamtx-service.hub.svc.cluster.local", newHostname)
+	return fmt.Sprintf("%s.mediamtx-headless.hub.svc.cluster.local", newHostname)
 }
 
 func getEndpoints(writer http.ResponseWriter, request *http.Request) {
