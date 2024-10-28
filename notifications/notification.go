@@ -2,7 +2,11 @@ package main
 
 import (
 	"context"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"log"
@@ -40,6 +44,21 @@ type ReceiverConfig struct {
 }
 
 var receivers map[string][]ReceiverConfig = make(map[string][]ReceiverConfig)
+var privateKey *rsa.PrivateKey
+
+func init() {
+	privateKeyData, err := os.ReadFile("/etc/private-key/private_key.pem")
+	if err != nil {
+		log.Fatalf("failed to load private key: %v", err)
+	}
+
+	block, _ := pem.Decode(privateKeyData)
+	key, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	if err != nil {
+		log.Fatalf("failed to parse private key: %v", err)
+	}
+	privateKey = key
+}
 
 func addCameraConfig(writer http.ResponseWriter, request *http.Request) {
 	defer request.Body.Close()
@@ -205,8 +224,11 @@ func sendRequest(cameraID string, config ReceiverConfig) error {
 		if len(config.WebhookAuthType) != 0 {
 			authType = config.WebhookAuthType
 		}
-		// TODO: decrypt credentials using the shared cipher from the k8s secret
-		req.Header.Set("Authentication", fmt.Sprintf("%s %s", authType, config.WebhookCredentials))
+		creds, err := decryptCredentials(config.WebhookCredentials)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authentication", fmt.Sprintf("%s %s", authType, creds))
 	}
 
 	res, err := http.DefaultClient.Do(req)
@@ -230,9 +252,13 @@ func sendEmail(cameraID string, config ReceiverConfig) error {
 	// Navigate to App Password Generator, designate an app name such as "security project," and obtain a 16-digit password.
 	// Copy this password and paste it into the designated password field as instructed.
 
-	// TODO: decrypt credentials using the shared cipher from the k8s secret
+	creds, err := decryptCredentials(config.SmtpCredentials)
+	if err != nil {
+		return err
+	}
+
 	// maybe strip port from the server url?
-	auth := smtp.PlainAuth("", config.SmtpSender, config.SmtpCredentials, config.SmtpServer)
+	auth := smtp.PlainAuth("", config.SmtpSender, creds, config.SmtpServer)
 
 	to := []string{config.SmtpRecipient}
 
@@ -242,6 +268,19 @@ func sendEmail(cameraID string, config ReceiverConfig) error {
 
 	//"smtp.gmail.com:587"
 	return smtp.SendMail(config.SmtpServer, auth, config.SmtpSender, to, msg)
+}
+
+func decryptCredentials(credentials string) (string, error) {
+	encryptedData, err := base64.StdEncoding.DecodeString(credentials)
+	if err != nil {
+		return "", fmt.Errorf("failed to decode credentials: %v", err)
+	}
+
+	decryptedBytes, err := rsa.DecryptPKCS1v15(nil, privateKey, encryptedData)
+	if err != nil {
+		return "", fmt.Errorf("failed to decrypt credentials: %v", err)
+	}
+	return string(decryptedBytes), nil
 }
 
 func main() {
