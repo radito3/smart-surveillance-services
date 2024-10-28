@@ -107,9 +107,40 @@ func updateCameraConfig(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 
-	// TODO: if there are open SSE connections, just change the channel reference to the new object
+outer:
+	for i := range data.Receivers {
+		if data.Receivers[i].UIPopup {
+			for j := range receivers[cameraID] {
+				if receivers[cameraID][j].connOpen {
+					data.Receivers[i].connOpen = true
+					data.Receivers[i].eventsChannel = receivers[cameraID][j].eventsChannel
+					break outer
+				}
+			}
+		}
+	}
+
 	receivers[cameraID] = data.Receivers
 	writer.WriteHeader(http.StatusOK)
+}
+
+func removeCameraConfig(writer http.ResponseWriter, request *http.Request) {
+	cameraID := chi.URLParam(request, "cameraID")
+
+	configs, present := receivers[cameraID]
+	if !present {
+		writer.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	for i := range configs {
+		if configs[i].connOpen {
+			configs[i].connOpen = false
+			close(configs[i].eventsChannel)
+			break
+		}
+	}
+	writer.WriteHeader(http.StatusNoContent)
 }
 
 // for future dev: consider making this asynchronous, as it will be called from the analysis program
@@ -178,8 +209,10 @@ func notificationsPushChannel(w http.ResponseWriter, r *http.Request) {
 
 	defer func() {
 		config := receivers[cameraID]
-		config[receiverIdx].connOpen = false
-		close(config[receiverIdx].eventsChannel)
+		if config[receiverIdx].connOpen {
+			config[receiverIdx].connOpen = false
+			close(config[receiverIdx].eventsChannel)
+		}
 	}()
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -193,11 +226,13 @@ func notificationsPushChannel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	for {
+	for config[receiverIdx].connOpen {
 		select {
-		case message := <-eventsChannel:
-			fmt.Fprint(w, message)
-			flusher.Flush() // Push event to client
+		case message, chanOpen := <-eventsChannel:
+			if chanOpen {
+				fmt.Fprint(w, message)
+				flusher.Flush() // Push event to client
+			}
 		case <-r.Context().Done():
 			return
 		}
@@ -295,8 +330,9 @@ func main() {
 	router.Use(middleware.CleanPath)
 	router.Use(middleware.Heartbeat("/public/ping"))
 
-	router.Post("/add", addCameraConfig)
-	router.Patch("/update/{cameraID}", updateCameraConfig)
+	router.Post("/configs", addCameraConfig)
+	router.Patch("/configs/{cameraID}", updateCameraConfig)
+	router.Delete("/configs/{cameraID}", removeCameraConfig)
 	router.Post("/alert/{cameraID}", sendNotification)
 	router.Get("/notifications/{cameraID}", notificationsPushChannel)
 
