@@ -80,4 +80,4 @@ if __name__ == "__main__":
         sys.exit(1)
 
     video_url = sys.argv[1]
-    process_video(video_url, "/app")
+    process_video(video_url, "/app/")
