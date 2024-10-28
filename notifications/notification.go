@@ -140,6 +140,7 @@ func removeCameraConfig(writer http.ResponseWriter, request *http.Request) {
 			break
 		}
 	}
+	delete(receivers, cameraID)
 	writer.WriteHeader(http.StatusNoContent)
 }
 
