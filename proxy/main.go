@@ -5,12 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
 	"os/signal"
+	"regexp"
 	"strconv"
 	"syscall"
 	"time"
@@ -49,6 +51,12 @@ func addCamera(w http.ResponseWriter, r *http.Request) {
 	err := json.NewDecoder(r.Body).Decode(&data)
 	if err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	parsedSourceURL, err := url.Parse(data.Source)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Invalid Source URL %q: %v", data.Source, err), http.StatusBadRequest)
 		return
 	}
 
@@ -102,11 +110,9 @@ func addCamera(w http.ResponseWriter, r *http.Request) {
 			config.Source = ""
 			config.RunOnPublishRestart = false
 			config.RunOnPublish = ""
-			// TODO: extract protocol and port
-			config.SourceRedirect = "<protocol>://" + string(hostname) + ":<port>/" + config.Path
+			config.SourceRedirect = parsedSourceURL.Scheme + "://" + string(hostname) + ":" + parsedSourceURL.Port() + "/" + config.Path
 
-			// TODO: change the hostname ordinal index to i
-			err = sendConfigRequest(config, string(hostname))
+			err = sendConfigRequest(config, changeHostnameSuffix(string(hostname), i))
 			if err != nil {
 				// should we stop or continue here?
 				http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -132,11 +138,21 @@ func sendConfigRequest(config CameraEndpointConfig, host string) error {
 
 	// TODO: handle the case where the camera endpoint is already created
 	if res.StatusCode/100 != 2 {
-		// w.WriteHeader(res.StatusCode)
-		// w.Write(res.Body)
-		return nil
+		bodyBytes, err := io.ReadAll(res.Body)
+		if err != nil {
+			return fmt.Errorf("could not read config response body: %v", err)
+		}
+		return fmt.Errorf("config response error: %s", string(bodyBytes))
 	}
 	return nil
+}
+
+func changeHostnameSuffix(hostname string, newSuffix int) string {
+	re := regexp.MustCompile(`(\D+)(\d+)$`)
+	matches := re.FindStringSubmatch(hostname)
+
+	newHostname := matches[1] + strconv.Itoa(newSuffix)
+	return newHostname
 }
 
 func getEndpoints(writer http.ResponseWriter, request *http.Request) {
