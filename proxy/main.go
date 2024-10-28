@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"regexp"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -44,42 +45,38 @@ type CameraEndpointConfig struct {
 	RunOnPublishRestart bool   `json:"runOnPublishRestart,omitempty"`
 }
 
-func addCamera(w http.ResponseWriter, r *http.Request) {
-	defer r.Body.Close()
+func addCamera(writer http.ResponseWriter, request *http.Request) {
+	defer request.Body.Close()
 
 	var data CameraEndpointRequest
-	err := json.NewDecoder(r.Body).Decode(&data)
+	err := json.NewDecoder(request.Body).Decode(&data)
 	if err != nil {
-		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		http.Error(writer, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
 
 	parsedSourceURL, err := url.Parse(data.Source)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Invalid Source URL %q: %v", data.Source, err), http.StatusBadRequest)
+		http.Error(writer, fmt.Sprintf("Invalid Source URL %q: %v", data.Source, err), http.StatusBadRequest)
 		return
 	}
 
 	// TODO: ignore 409 Conflict, as the camera endpoint may already be created
 	err = createMlPipelineDeployment(data.Source, data.AnalysisMode, data.ID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(writer, err.Error(), http.StatusBadRequest)
 		return
 	}
 
 	totalInstances, err := getStatefulSetInstances()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	hostname, err := os.ReadFile("/etc/hostname")
-	if err != nil {
-		http.Error(w, fmt.Sprintf("could not read hostname: %v", err), http.StatusInternalServerError)
-		return
-	}
+	hostname := os.Getenv("HOSTNAME")
 
-	currentInstanceIdxStr := string(hostname)[bytes.LastIndexByte(hostname, '-')+1:]
+	currentInstanceIdxStr := hostname[strings.LastIndexByte(hostname, '-')+1:]
 	currentInstanceIdx, _ := strconv.Atoi(currentInstanceIdxStr)
 
 	var config CameraEndpointConfig
@@ -101,7 +98,7 @@ func addCamera(w http.ResponseWriter, r *http.Request) {
 
 	err = sendConfigRequest(config, "localhost")
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -115,13 +112,13 @@ func addCamera(w http.ResponseWriter, r *http.Request) {
 			err = sendConfigRequest(config, changeHostnameSuffix(string(hostname), i))
 			if err != nil {
 				// should we stop or continue here?
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				http.Error(writer, err.Error(), http.StatusInternalServerError)
 				return
 			}
 		}
 	}
 
-	w.WriteHeader(http.StatusOK)
+	writer.WriteHeader(http.StatusOK)
 }
 
 func sendConfigRequest(config CameraEndpointConfig, host string) error {
@@ -152,7 +149,7 @@ func changeHostnameSuffix(hostname string, newSuffix int) string {
 	matches := re.FindStringSubmatch(hostname)
 
 	newHostname := matches[1] + strconv.Itoa(newSuffix)
-	return newHostname
+	return fmt.Sprintf("%s.mediamtx-service.hub.svc.cluster.local", newHostname)
 }
 
 func getEndpoints(writer http.ResponseWriter, request *http.Request) {
@@ -263,6 +260,70 @@ func createMlPipelineDeployment(cameraUrl, analysisMode, cameraID string) error 
 
 func int32Ptr(i int32) *int32 { return &i }
 
+func deleteCameraEndpoint(writer http.ResponseWriter, request *http.Request) {
+	cameraPath := chi.URLParam(request, "path")
+
+	req, _ := http.NewRequest(http.MethodDelete, "http://localhost:9997/v3/config/paths/delete/"+cameraPath, nil)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		http.Error(writer, fmt.Sprintf("camera path %q not found", cameraPath), http.StatusNotFound)
+		return
+	}
+
+	if resp.StatusCode == http.StatusInternalServerError {
+		bodyBytes, err := io.ReadAll(resp.Body)
+		if err != nil {
+			http.Error(writer, fmt.Sprintf("could not read config response body: %v", err), http.StatusInternalServerError)
+			return
+		}
+		http.Error(writer, fmt.Sprintf("config response error: %s", string(bodyBytes)), http.StatusInternalServerError)
+		return
+	}
+
+	totalInstances, err := getStatefulSetInstances()
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	hostname := os.Getenv("HOSTNAME")
+
+	currentInstanceIdxStr := hostname[strings.LastIndexByte(hostname, '-')+1:]
+	currentInstanceIdx, _ := strconv.Atoi(currentInstanceIdxStr)
+
+	for i := 0; i < int(totalInstances); i++ {
+		if i != currentInstanceIdx {
+			req, _ = http.NewRequest(http.MethodDelete, "http://"+changeHostnameSuffix(string(hostname), i)+":9997/v3/config/paths/delete/"+cameraPath, nil)
+
+			resp, err = http.DefaultClient.Do(req)
+			if err != nil {
+				http.Error(writer, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode == http.StatusInternalServerError {
+				bodyBytes, err := io.ReadAll(resp.Body)
+				if err != nil {
+					http.Error(writer, fmt.Sprintf("could not read config response body: %v", err), http.StatusInternalServerError)
+					return
+				}
+				http.Error(writer, fmt.Sprintf("config response error: %s", string(bodyBytes)), http.StatusInternalServerError)
+				return
+			}
+		}
+	}
+
+	writer.WriteHeader(http.StatusNoContent)
+}
+
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix | log.LUTC)
 	log.SetPrefix("[debug] ")
@@ -277,6 +338,7 @@ func main() {
 
 	router.Post("/endpoints", addCamera)
 	router.Get("/endpoints", getEndpoints)
+	router.Delete("/endpoints/{path}", deleteCameraEndpoint)
 
 	server := &http.Server{
 		Addr:              ":8080",
