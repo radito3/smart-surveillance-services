@@ -231,7 +231,7 @@ func createMlPipelineDeployment(cameraUrl, analysisMode, cameraID string) error 
 							Args: []string{
 								cameraUrl,
 								analysisMode,
-								"notif-service.k8s.internal:8080/alert/" + cameraID,
+								"http://notification-service.hub.svc.cluster.local/alert/" + cameraID,
 							},
 							Env: []corev1.EnvVar{
 								{
