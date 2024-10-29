@@ -33,16 +33,19 @@ type CameraEndpointRequest struct {
 	AnalysisMode      string `json:"analysisMode"`
 	Source            string `json:"source"`
 	EnableTranscoding bool   `json:"enableTranscoding,omitempty"`
+	Record            bool   `json:"record,omitempty"`
 	MaxReaders        int64  `json:"maxReaders,omitempty"`
 }
 
 type CameraEndpointConfig struct {
-	Path                string `json:"name"`
-	Source              string `json:"source,omitempty"`
-	SourceRedirect      string `json:"sourceRedirect,omitempty"`
-	MaxReaders          int64  `json:"maxReaders,omitempty"`
-	RunOnPublish        string `json:"runOnPublish,omitempty"`
-	RunOnPublishRestart bool   `json:"runOnPublishRestart,omitempty"`
+	Path                       string `json:"name"`
+	Source                     string `json:"source,omitempty"`
+	MaxReaders                 int64  `json:"maxReaders,omitempty"`
+	RunOnPublish               string `json:"runOnPublish,omitempty"`
+	RunOnPublishRestart        bool   `json:"runOnPublishRestart,omitempty"`
+	Record                     bool   `json:"record,omitempty"`
+	RunOnInit                  string `json:"runOnInit,omitempty"`
+	RunOnRecordSegmentComplete string `json:"runOnRecordSegmentComplete,omitempty"`
 }
 
 func addCamera(writer http.ResponseWriter, request *http.Request) {
@@ -95,6 +98,13 @@ func addCamera(writer http.ResponseWriter, request *http.Request) {
 			"-hls_segment_filename /" + config.Path + "/stream_%v/segment_%d.ts " +
 			"/" + config.Path + "/stream_%v/playlist.m3u8"
 	}
+	if data.Record {
+		// TODO: run rclone config with the user-provided data
+		config.Record = true
+		// sync in case a crash has occured
+		config.RunOnInit = "rclone sync /recordings myconfig:/recordings"
+		config.RunOnRecordSegmentComplete = "rclone move --min-age=5s /recordings/{path} myconfig:/recordings/{path}"
+	}
 
 	err = sendConfigRequest(config, "localhost")
 	if err != nil {
@@ -104,10 +114,9 @@ func addCamera(writer http.ResponseWriter, request *http.Request) {
 
 	for i := 0; i < int(totalInstances); i++ {
 		if i != currentInstanceIdx {
-			config.Source = ""
+			config.Source = parsedSourceURL.Scheme + "://" + changeHostnameSuffix(string(hostname), i) + ":" + parsedSourceURL.Port() + "/" + config.Path
 			config.RunOnPublishRestart = false
 			config.RunOnPublish = ""
-			config.SourceRedirect = parsedSourceURL.Scheme + "://" + string(hostname) + ".mediamtx:" + parsedSourceURL.Port() + "/" + config.Path
 
 			err = sendConfigRequest(config, changeHostnameSuffix(string(hostname), i))
 			if err != nil {
