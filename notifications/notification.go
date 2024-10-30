@@ -227,13 +227,22 @@ func notificationsPushChannel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	fmt.Fprintf(w, ": keep-alive\n\n")
+	flusher.Flush()
+
+	ticker := time.NewTicker(20 * time.Second)
+	defer ticker.Stop()
+
 	for config[receiverIdx].connOpen {
 		select {
 		case message, chanOpen := <-eventsChannel:
 			if chanOpen {
-				fmt.Fprint(w, message)
+				fmt.Fprintf(w, "data: %s\n\n", message)
 				flusher.Flush() // Push event to client
 			}
+		case <-ticker.C:
+			fmt.Fprint(w, ": keep-alive\n\n")
+			flusher.Flush()
 		case <-r.Context().Done():
 			return
 		}
