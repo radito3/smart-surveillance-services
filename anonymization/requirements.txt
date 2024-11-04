@@ -1,5 +1,5 @@
 torch
 torchvision
 facenet-pytorch
-opencv-python
+opencv-python-headless
 numpy

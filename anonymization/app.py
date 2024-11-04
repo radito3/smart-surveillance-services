@@ -12,11 +12,11 @@ processor = FaceAnonymizer()
 width, height = os.environ['DIMS'].split('x')
 
 while True:
-    in_bytes = sys.stdin.buffer.read(width * height * 3)
+    in_bytes = sys.stdin.buffer.read(int(width) * int(height) * 3)
     if not in_bytes:
         break
 
-    frame = np.frombuffer(in_bytes, np.uint8).reshape((height, width, 3))
+    frame = np.frombuffer(in_bytes, np.uint8).reshape((int(height), int(width), 3))
 
     processed_frame = processor(frame)
 
