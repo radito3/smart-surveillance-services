@@ -4,4 +4,4 @@
 
 trap 'kill %%' EXIT
 
-python3 app.py "$1"
+python3 app.py $@

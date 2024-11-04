@@ -28,15 +28,19 @@ def find_largest_segment_id(directory: str) -> int | None:
     return max_id
 
 
-def process_video(video_url: str, recoding_dir: str, idle_time: int = 30, low_fps: int = 1, high_fps: int = 24):
+def process_video(video_url: str, idle_time: int = 30, low_fps: int = 1, high_fps: int = 24):
     cap = cv2.VideoCapture(video_url)
+    if not cap.isOpened():
+        logging.error("Error: Unable to open video file.")
+        return
+
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
 
     max_segment_id = find_largest_segment_id(os.getcwd())
     current_segment: int = 0 if max_segment_id is None else max_segment_id
-    path_template: str = recoding_dir + "recording_{0}.mp4"
+    path_template: str = os.getcwd() + "/recording_{0}.mp4"
 
     out = cv2.VideoWriter(path_template.format(current_segment), fourcc, high_fps, (width, height))
 
@@ -45,7 +49,7 @@ def process_video(video_url: str, recoding_dir: str, idle_time: int = 30, low_fp
 
     ret, prev_frame = cap.read()
     if not ret:
-        print("Error: Unable to read the video file.")
+        logging.error("Error: Unable to read video file.")
         return
 
     while cap.isOpened():
@@ -80,4 +84,4 @@ if __name__ == "__main__":
         sys.exit(1)
 
     video_url = sys.argv[1]
-    process_video(video_url, "/app/")
+    process_video(video_url)

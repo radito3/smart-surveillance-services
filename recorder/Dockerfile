@@ -9,9 +9,6 @@ RUN apt-get update && \
     pip install -r requirements.txt && \
     chmod +x start.sh watchdog.sh
 
-# FIXME: ImportError (the installed pip packages aren't found by the script)
-ENV PYTHONPATH="${PYTHONPATH}:/usr/local/lib/python3.12/site-packages:/app"
-
 EXPOSE 8554
 
 ENTRYPOINT [ "./start.sh" ]
