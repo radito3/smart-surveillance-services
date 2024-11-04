@@ -53,11 +53,10 @@ func init() {
 	}
 
 	block, _ := pem.Decode(privateKeyData)
-	key, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	privateKey, err = x509.ParsePKCS1PrivateKey(block.Bytes)
 	if err != nil {
 		log.Fatalf("failed to parse private key: %v", err)
 	}
-	privateKey = key
 }
 
 func addCameraConfig(writer http.ResponseWriter, request *http.Request) {
@@ -273,7 +272,7 @@ func sendRequest(cameraID string, config ReceiverConfig) error {
 		if err != nil {
 			return err
 		}
-		req.Header.Set("Authentication", fmt.Sprintf("%s %s", authType, creds))
+		req.Header.Set("Authentication", fmt.Sprintf("%s %s", authType, string(creds)))
 	}
 
 	res, err := http.DefaultClient.Do(req)
@@ -302,8 +301,12 @@ func sendEmail(cameraID string, config ReceiverConfig) error {
 		return err
 	}
 
-	// maybe strip port from the server url?
-	auth := smtp.PlainAuth("", config.SmtpSender, creds, config.SmtpServer)
+	host := config.SmtpServer
+	portSeparatorIdx := strings.IndexByte(host, ':')
+	if portSeparatorIdx != -1 {
+		host = host[:portSeparatorIdx]
+	}
+	auth := smtp.PlainAuth("", config.SmtpSender, string(creds), host)
 
 	to := []string{config.SmtpRecipient}
 
@@ -311,21 +314,21 @@ func sendEmail(cameraID string, config ReceiverConfig) error {
 		"\r\n" +
 		"Camera " + cameraID + " has detected suspicious behaviour\r\n")
 
-	//"smtp.gmail.com:587"
+	// example server: smtp.gmail.com:587
 	return smtp.SendMail(config.SmtpServer, auth, config.SmtpSender, to, msg)
 }
 
-func decryptCredentials(credentials string) (string, error) {
+func decryptCredentials(credentials string) ([]byte, error) {
 	encryptedData, err := base64.StdEncoding.DecodeString(credentials)
 	if err != nil {
-		return "", fmt.Errorf("failed to decode credentials: %v", err)
+		return nil, fmt.Errorf("failed to decode credentials: %v", err)
 	}
 
 	decryptedBytes, err := rsa.DecryptPKCS1v15(nil, privateKey, encryptedData)
 	if err != nil {
-		return "", fmt.Errorf("failed to decrypt credentials: %v", err)
+		return nil, fmt.Errorf("failed to decrypt credentials: %v", err)
 	}
-	return string(decryptedBytes), nil
+	return decryptedBytes, nil
 }
 
 func main() {
@@ -353,7 +356,6 @@ func main() {
 		ReadHeaderTimeout: 2 * time.Second,
 		WriteTimeout:      10 * time.Second,
 	}
-	server.SetKeepAlivesEnabled(false)
 
 	go func() {
 		log.Println("starting server...")
