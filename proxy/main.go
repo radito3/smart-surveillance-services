@@ -12,7 +12,6 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
-	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -46,6 +45,20 @@ type CameraEndpointConfig struct {
 	Record                     bool   `json:"record,omitempty"`
 	RunOnInit                  string `json:"runOnInit,omitempty"`
 	RunOnRecordSegmentComplete string `json:"runOnRecordSegmentComplete,omitempty"`
+}
+
+var k8sClient *kubernetes.Clientset
+
+func init() {
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		log.Fatalf("failed to load in-cluster config: %v", err)
+	}
+
+	k8sClient, err = kubernetes.NewForConfig(config)
+	if err != nil {
+		log.Fatalf("failed to create k8s client: %v", err)
+	}
 }
 
 func addCamera(writer http.ResponseWriter, request *http.Request) {
@@ -101,9 +114,9 @@ func addCamera(writer http.ResponseWriter, request *http.Request) {
 	if data.Record {
 		// TODO: run rclone config with the user-provided data
 		config.Record = true
-		// sync in case a crash has occured
+		// sync the whole directory in case a crash has occured
 		config.RunOnInit = "rclone sync /recordings myconfig:/recordings"
-		config.RunOnRecordSegmentComplete = "rclone move --min-age=5s /recordings/{path} myconfig:/recordings/{path}"
+		config.RunOnRecordSegmentComplete = "rclone sync --min-age=5s /recordings/" + config.Path + " myconfig:/recordings/" + config.Path
 	}
 
 	err = sendConfigRequest(config, "localhost")
@@ -114,11 +127,13 @@ func addCamera(writer http.ResponseWriter, request *http.Request) {
 
 	for i := 0; i < int(totalInstances); i++ {
 		if i != currentInstanceIdx {
-			config.Source = parsedSourceURL.Scheme + "://" + changeHostnameSuffix(string(hostname), i) + ":" + parsedSourceURL.Port() + "/" + config.Path
+			config.Source = parsedSourceURL.Scheme + "://" + getNewHostname(hostname, i) + ":" + parsedSourceURL.Port() + "/" + config.Path
 			config.RunOnPublishRestart = false
+			config.Record = false
 			config.RunOnPublish = ""
+			config.RunOnInit = ""
 
-			err = sendConfigRequest(config, changeHostnameSuffix(string(hostname), i))
+			err = sendConfigRequest(config, getNewHostname(hostname, i))
 			if err != nil {
 				// should we stop or continue here?
 				http.Error(writer, err.Error(), http.StatusInternalServerError)
@@ -153,12 +168,9 @@ func sendConfigRequest(config CameraEndpointConfig, host string) error {
 	return nil
 }
 
-func changeHostnameSuffix(hostname string, newSuffix int) string {
-	re := regexp.MustCompile(`(\D+)(\d+)$`)
-	matches := re.FindStringSubmatch(hostname)
-
-	newHostname := matches[1] + strconv.Itoa(newSuffix)
-	return fmt.Sprintf("%s.mediamtx-headless.hub.svc.cluster.local", newHostname)
+func getNewHostname(hostname string, newSuffix int) string {
+	podName := hostname[:strings.LastIndexByte(hostname, '-')]
+	return fmt.Sprintf("%s-%d.mediamtx-headless.hub.svc.cluster.local", podName, newSuffix)
 }
 
 func getEndpoints(writer http.ResponseWriter, request *http.Request) {
@@ -171,39 +183,21 @@ func getEndpoints(writer http.ResponseWriter, request *http.Request) {
 }
 
 func getStatefulSetInstances() (int32, error) {
-	statefulSet := "mediamtx"
-	config, err := rest.InClusterConfig()
-	if err != nil {
-		return -1, fmt.Errorf("failed to load in-cluster config: %v", err)
-	}
-
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		return -1, fmt.Errorf("failed to create k8s client: %v", err)
-	}
-
-	statefulSetsClient := clientset.AppsV1().StatefulSets("hub")
+	statefulSetsClient := k8sClient.AppsV1().StatefulSets("hub")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	sts, err := statefulSetsClient.Get(ctx, statefulSet, metav1.GetOptions{})
+	log.Println("Checking StatefulSet instances...")
+	sts, err := statefulSetsClient.Get(ctx, "mediamtx", metav1.GetOptions{})
 	if err != nil {
-		return -1, fmt.Errorf("could not get StatefulSet %s: %v", statefulSet, err)
+		return -1, fmt.Errorf("could not get StatefulSet mediamtx: %v", err)
 	}
 
 	return sts.Status.Replicas, nil
 }
 
 func createMlPipelineDeployment(cameraUrl, analysisMode, cameraID string) error {
-	config, err := rest.InClusterConfig()
-	if err != nil {
-		return fmt.Errorf("failed to load in-cluster config: %v", err)
-	}
-
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		return fmt.Errorf("failed to create k8s client: %v", err)
-	}
+	log.Println("Creating Deployment ml-pipeline-" + cameraID)
 
 	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -254,16 +248,16 @@ func createMlPipelineDeployment(cameraUrl, analysisMode, cameraID string) error 
 		},
 	}
 
-	deplomentsClient := clientset.AppsV1().Deployments("ml-analysis")
+	deplomentsClient := k8sClient.AppsV1().Deployments("ml-analysis")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	result, err := deplomentsClient.Create(ctx, deployment, metav1.CreateOptions{})
+	_, err := deplomentsClient.Create(ctx, deployment, metav1.CreateOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to create Deployment: %v", err)
 	}
 
-	fmt.Printf("Created Deployment %q\n", result.GetObjectMeta().GetName())
+	log.Println("Created Deployment ml-pipeline-" + cameraID)
 	return nil
 }
 
@@ -309,7 +303,7 @@ func deleteCameraEndpoint(writer http.ResponseWriter, request *http.Request) {
 
 	for i := 0; i < int(totalInstances); i++ {
 		if i != currentInstanceIdx {
-			req, _ = http.NewRequest(http.MethodDelete, "http://"+changeHostnameSuffix(string(hostname), i)+":9997/v3/config/paths/delete/"+cameraPath, nil)
+			req, _ = http.NewRequest(http.MethodDelete, "http://"+getNewHostname(hostname, i)+":9997/v3/config/paths/delete/"+cameraPath, nil)
 
 			resp, err = http.DefaultClient.Do(req)
 			if err != nil {
