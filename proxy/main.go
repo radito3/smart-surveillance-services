@@ -221,7 +221,7 @@ func createMlPipelineDeployment(cameraUrl, analysisMode, cameraID string) error 
 					Containers: []corev1.Container{
 						{
 							Name:  "ml-pipeline",
-							Image: "python:3.12-bookworm", // TODO: build a custom image
+							Image: "radito3/ss-ml-analysis:1.0.0",
 							Args: []string{
 								cameraUrl,
 								analysisMode,
