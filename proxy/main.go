@@ -11,6 +11,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strconv"
 	"strings"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/gorilla/websocket"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -327,6 +329,57 @@ func deleteCameraEndpoint(writer http.ResponseWriter, request *http.Request) {
 	writer.WriteHeader(http.StatusNoContent)
 }
 
+func streamRTSPToWebSocket(rtspURL string, wsConn *websocket.Conn) {
+	// https://trac.ffmpeg.org/wiki/StreamingGuide
+	cmd := exec.Command("ffmpeg", "-re", "-i", rtspURL, "-f", "mpegts", "-codec:v", "mpeg1video", "-")
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		log.Println("Error creating stdout pipe:", err)
+		return
+	}
+
+	if err := cmd.Start(); err != nil {
+		log.Println("Error starting FFmpeg:", err)
+		return
+	}
+	defer cmd.Wait()
+
+	buf := make([]byte, 4096)
+	for {
+		n, err := stdout.Read(buf)
+		if err != nil {
+			log.Println("Error reading from FFmpeg stdout:", err)
+			break
+		}
+
+		if err := wsConn.WriteMessage(websocket.BinaryMessage, buf[:n]); err != nil {
+			log.Println("Error sending WebSocket message:", err)
+			break
+		}
+	}
+}
+
+func wsHandler(w http.ResponseWriter, r *http.Request) {
+	rtspPath := chi.URLParam(r, "path")
+	rtspURL := "rtsp://localhost:8554/" + rtspPath
+
+	var upgrader = websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool {
+			return true // Allow all connections
+		},
+	}
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Println("WebSocket upgrade error:", err)
+		return
+	}
+	defer conn.Close()
+
+	log.Printf("Client connected for RTSP path: %s", rtspPath)
+	streamRTSPToWebSocket(rtspURL, conn)
+}
+
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix | log.LUTC)
 	log.SetPrefix("[debug] ")
@@ -342,6 +395,7 @@ func main() {
 	router.Post("/endpoints", addCamera)
 	router.Get("/endpoints", getEndpoints)
 	router.Delete("/endpoints/{path}", deleteCameraEndpoint)
+	router.Get("/ws/{path}", wsHandler)
 
 	server := &http.Server{
 		Addr:              ":8080",
@@ -350,7 +404,6 @@ func main() {
 		ReadHeaderTimeout: 2 * time.Second,
 		WriteTimeout:      10 * time.Second,
 	}
-	server.SetKeepAlivesEnabled(false)
 
 	go func() {
 		log.Println("starting server...")
