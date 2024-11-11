@@ -343,7 +343,7 @@ func streamRTSPToWebSocket(rtspURL string, wsConn *websocket.Conn) {
 		log.Println("Error starting FFmpeg:", err)
 		return
 	}
-	defer cmd.Wait()
+	defer cmd.Process.Signal(os.Interrupt)
 
 	buf := make([]byte, 4096)
 	for {
