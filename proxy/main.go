@@ -329,9 +329,9 @@ func deleteCameraEndpoint(writer http.ResponseWriter, request *http.Request) {
 	writer.WriteHeader(http.StatusNoContent)
 }
 
-func streamRTSPToWebSocket(rtspURL string, wsConn *websocket.Conn) {
+func transcodeToMPEGTS(streamURL string, wsConn *websocket.Conn) {
 	// https://trac.ffmpeg.org/wiki/StreamingGuide
-	cmd := exec.Command("ffmpeg", "-re", "-i", rtspURL, "-f", "mpegts", "-codec:v", "mpeg1video", "-")
+	cmd := exec.Command("ffmpeg", "-re", "-i", streamURL, "-f", "mpegts", "-codec:v", "mpeg1video", "-")
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -360,9 +360,22 @@ func streamRTSPToWebSocket(rtspURL string, wsConn *websocket.Conn) {
 	}
 }
 
+func transcodeToHLS(rtmpURL string) {
+	//ffmpeg -re -i $rtmpURL \
+	// -c:v libx264 -preset veryfast -crf 23 \
+	// -f hls \
+	// -hls_time 2 \
+	// -hls_list_size 5 \
+	// -hls_flags delete_segments \
+	// output.m3u8
+}
+
 func wsHandler(w http.ResponseWriter, r *http.Request) {
-	rtspPath := chi.URLParam(r, "path")
-	rtspURL := "rtsp://localhost:8554/" + rtspPath
+	streamPath := chi.URLParam(r, "path")
+
+	// TODO: query MediaMTX to find the protocol and infer the port
+
+	streamURL := "rtsp://localhost:8554/" + streamPath
 
 	var upgrader = websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
@@ -376,8 +389,8 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	log.Printf("Client connected for RTSP path: %s", rtspPath)
-	streamRTSPToWebSocket(rtspURL, conn)
+	log.Printf("Client connected to stream path: %s", streamPath)
+	transcodeToMPEGTS(streamURL, conn)
 }
 
 func main() {
