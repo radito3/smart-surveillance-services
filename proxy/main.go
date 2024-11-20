@@ -31,7 +31,6 @@ import (
 
 type CameraEndpointRequest struct {
 	ID                string `json:"ID"`
-	AnalysisMode      string `json:"analysisMode"`
 	Source            string `json:"source"`
 	EnableTranscoding bool   `json:"enableTranscoding,omitempty"`
 	Record            bool   `json:"record,omitempty"`
@@ -47,6 +46,11 @@ type CameraEndpointConfig struct {
 	Record                     bool   `json:"record,omitempty"`
 	RunOnInit                  string `json:"runOnInit,omitempty"`
 	RunOnRecordSegmentComplete string `json:"runOnRecordSegmentComplete,omitempty"`
+}
+
+type StartAnalysisRequest struct {
+	CameraPath   string `json:"cameraPath"`
+	AnalysisMode string `json:"analysisMode"`
 }
 
 var k8sClient *kubernetes.Clientset
@@ -76,13 +80,6 @@ func addCamera(writer http.ResponseWriter, request *http.Request) {
 	parsedSourceURL, err := url.Parse(data.Source)
 	if err != nil {
 		http.Error(writer, fmt.Sprintf("Invalid Source URL %q: %v", data.Source, err), http.StatusBadRequest)
-		return
-	}
-
-	// TODO: ignore 409 Conflict, as the camera endpoint may already be created
-	err = createMlPipelineDeployment(data.Source, data.AnalysisMode, data.ID)
-	if err != nil {
-		http.Error(writer, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -198,7 +195,7 @@ func getStatefulSetInstances() (int32, error) {
 	return sts.Status.Replicas, nil
 }
 
-func createMlPipelineDeployment(cameraUrl, analysisMode, cameraID string) error {
+func createMlPipelineDeployment(streamURL, analysisMode, cameraID string) error {
 	log.Println("Creating Deployment ml-pipeline-" + cameraID)
 
 	deployment := &appsv1.Deployment{
@@ -225,7 +222,7 @@ func createMlPipelineDeployment(cameraUrl, analysisMode, cameraID string) error 
 							Name:  "ml-pipeline",
 							Image: "radito3/ss-ml-analysis:1.0.0",
 							Args: []string{
-								cameraUrl,
+								streamURL,
 								analysisMode,
 								"http://notification-service.hub.svc.cluster.local/alert/" + cameraID,
 							},
@@ -329,6 +326,30 @@ func deleteCameraEndpoint(writer http.ResponseWriter, request *http.Request) {
 	writer.WriteHeader(http.StatusNoContent)
 }
 
+func startAnalysis(writer http.ResponseWriter, request *http.Request) {
+	defer request.Body.Close()
+
+	var data StartAnalysisRequest
+	err := json.NewDecoder(request.Body).Decode(&data)
+	if err != nil {
+		http.Error(writer, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	// TODO: query MediaMtx to check the protocol and infer the port
+	streamURL := ""
+
+	cameraID, _ := strings.CutPrefix(data.CameraPath, "camera-")
+	// TODO: ignore 409 Conflict, as the camera endpoint may already be created
+	err = createMlPipelineDeployment(streamURL, data.AnalysisMode, cameraID)
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	writer.WriteHeader(http.StatusCreated)
+}
+
 func transcodeToMPEGTS(streamURL string, wsConn *websocket.Conn) {
 	// https://trac.ffmpeg.org/wiki/StreamingGuide
 	cmd := exec.Command("ffmpeg", "-re", "-i", streamURL, "-f", "mpegts", "-codec:v", "mpeg1video", "-")
@@ -408,6 +429,7 @@ func main() {
 	router.Post("/endpoints", addCamera)
 	router.Get("/endpoints", getEndpoints)
 	router.Delete("/endpoints/{path}", deleteCameraEndpoint)
+	router.Post("/analysis", startAnalysis)
 	router.Get("/ws/{path}", wsHandler)
 
 	server := &http.Server{
