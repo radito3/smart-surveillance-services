@@ -48,12 +48,22 @@ type CameraEndpointConfig struct {
 	RunOnRecordSegmentComplete string `json:"runOnRecordSegmentComplete,omitempty"`
 }
 
-type StartAnalysisRequest struct {
-	CameraPath   string `json:"cameraPath"`
-	AnalysisMode string `json:"analysisMode"`
+type PathsListResponse struct {
+	Pages    int64        `json:"pageCount"`
+	NumItems int64        `json:"itemCount"`
+	Items    []PathConfig `json:"items"`
+}
+
+type PathConfig struct {
+	Name   string `json:"name"`
+	Source struct {
+		Type string `json:"type"`
+	} `json:"source"`
 }
 
 var k8sClient *kubernetes.Clientset
+var mtxSourceToPort map[string]string
+var portToProtocol map[string]string
 
 func init() {
 	config, err := rest.InClusterConfig()
@@ -64,6 +74,20 @@ func init() {
 	k8sClient, err = kubernetes.NewForConfig(config)
 	if err != nil {
 		log.Fatalf("failed to create k8s client: %v", err)
+	}
+
+	mtxSourceToPort = map[string]string{
+		"hlsSource":       "8888",
+		"rpiCameraSource": "8554",
+		"rtmpSource":      "1935",
+		"rtmpConn":        "1935",
+		"rtspSession":     "8554",
+		"rtspSource":      "8554",
+	}
+	portToProtocol = map[string]string{
+		"8554": "rtsp",
+		"1935": "rtmp",
+		"8888": "http",
 	}
 }
 
@@ -104,7 +128,7 @@ func addCamera(writer http.ResponseWriter, request *http.Request) {
 			"-b:v:0 500k -maxrate:v:0 500k -bufsize:v:0 1000k -s:v:0 640x360 -c:v:0 libx264 " +
 			"-b:v:1 1000k -maxrate:v:1 1000k -bufsize:v:1 2000k -s:v:1 1280x720 -c:v:1 libx264 " +
 			"-b:v:2 2000k -maxrate:v:2 2000k -bufsize:v:2 4000k -s:v:2 1920x1080 -c:v:2 libx264 " +
-			"-c:a aac -b:a 128k -f hls -hls_time 4 -hls_list_size 5 " +
+			"-c:a aac -b:a 128k -f hls -hls_time 4 -hls_list_size 5 -hls_flags delete_segments " +
 			"-var_stream_map \"v:0,a:0 v:1,a:1 v:2,a:2\" " +
 			"-master_pl_name master.m3u8 " +
 			"-hls_segment_filename /" + config.Path + "/stream_%v/segment_%d.ts " +
@@ -126,7 +150,11 @@ func addCamera(writer http.ResponseWriter, request *http.Request) {
 
 	for i := 0; i < int(totalInstances); i++ {
 		if i != currentInstanceIdx {
-			config.Source = parsedSourceURL.Scheme + "://" + getNewHostname(hostname, i) + ":" + parsedSourceURL.Port() + "/" + config.Path
+			port := parsedSourceURL.Port()
+			if len(port) != 0 {
+				port = ":" + parsedSourceURL.Port()
+			}
+			config.Source = parsedSourceURL.Scheme + "://" + getNewHostname(hostname, i) + port + "/" + config.Path
 			config.RunOnPublishRestart = false
 			config.Record = false
 			config.RunOnPublish = ""
@@ -327,23 +355,40 @@ func deleteCameraEndpoint(writer http.ResponseWriter, request *http.Request) {
 }
 
 func startAnalysis(writer http.ResponseWriter, request *http.Request) {
-	defer request.Body.Close()
+	cameraID := chi.URLParam(request, "cameraID")
+	analysisMode := request.URL.Query().Get("analysisMode")
 
-	var data StartAnalysisRequest
-	err := json.NewDecoder(request.Body).Decode(&data)
+	resp, err := http.Get("http://localhost:9997/v3/paths/list")
 	if err != nil {
-		http.Error(writer, "Invalid JSON", http.StatusBadRequest)
+		http.Error(writer, fmt.Sprintf("could not get paths list: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+
+	var pathsResp PathsListResponse
+	// ignore any parsing errors, because we assume MediaMTX returns valid responses
+	json.NewDecoder(resp.Body).Decode(&pathsResp)
+
+	streamURL := "http://mediamtx.hub.svc.cluster.local:"
+	found := false
+
+	// paging?
+	for _, item := range pathsResp.Items {
+		if item.Name == "camera-"+cameraID {
+			streamURL += mtxSourceToPort[item.Source.Type] + "/camera-" + cameraID
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		http.Error(writer, fmt.Sprintf("Camera with ID %s not found", cameraID), http.StatusNotFound)
 		return
 	}
 
-	// TODO: query MediaMtx to check the protocol and infer the port
-	streamURL := ""
-
-	cameraID, _ := strings.CutPrefix(data.CameraPath, "camera-")
-	// TODO: ignore 409 Conflict, as the camera endpoint may already be created
-	err = createMlPipelineDeployment(streamURL, data.AnalysisMode, cameraID)
+	err = createMlPipelineDeployment(streamURL, analysisMode, cameraID)
 	if err != nil {
-		http.Error(writer, err.Error(), http.StatusBadRequest)
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -353,6 +398,8 @@ func startAnalysis(writer http.ResponseWriter, request *http.Request) {
 func transcodeToMPEGTS(streamURL string, wsConn *websocket.Conn) {
 	// https://trac.ffmpeg.org/wiki/StreamingGuide
 	cmd := exec.Command("ffmpeg", "-re", "-i", streamURL, "-f", "mpegts", "-codec:v", "mpeg1video", "-")
+	// for HLS:
+	// ffmpeg -re -i $streamURL -c:v libx264 -preset veryfast -crf 23 -f hls -hls_time 2 -hls_list_size 5 -hls_flags delete_segments output.m3u8
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -381,29 +428,47 @@ func transcodeToMPEGTS(streamURL string, wsConn *websocket.Conn) {
 	}
 }
 
-func transcodeToHLS(rtmpURL string) {
-	//ffmpeg -re -i $rtmpURL \
-	// -c:v libx264 -preset veryfast -crf 23 \
-	// -f hls \
-	// -hls_time 2 \
-	// -hls_list_size 5 \
-	// -hls_flags delete_segments \
-	// output.m3u8
-}
+func wsHandler(writer http.ResponseWriter, request *http.Request) {
+	streamPath := chi.URLParam(request, "path")
 
-func wsHandler(w http.ResponseWriter, r *http.Request) {
-	streamPath := chi.URLParam(r, "path")
+	resp, err := http.Get("http://localhost:9997/v3/paths/list")
+	if err != nil {
+		http.Error(writer, fmt.Sprintf("could not get paths list: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
 
-	// TODO: query MediaMTX to find the protocol and infer the port
+	var pathsResp PathsListResponse
+	// ignore any parsing errors, because we assume MediaMTX returns valid responses
+	json.NewDecoder(resp.Body).Decode(&pathsResp)
 
-	streamURL := "rtsp://localhost:8554/" + streamPath
+	var port string
+	var sourceType string
+	found := false
+
+	// paging?
+	for _, item := range pathsResp.Items {
+		if item.Name == streamPath {
+			sourceType = item.Source.Type
+			port = mtxSourceToPort[item.Source.Type]
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		http.Error(writer, fmt.Sprintf("Stream path %s not found", streamPath), http.StatusNotFound)
+		return
+	}
+
+	streamURL := portToProtocol[port] + "://localhost:" + mtxSourceToPort[sourceType] + "/" + streamPath
 
 	var upgrader = websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
 			return true // Allow all connections
 		},
 	}
-	conn, err := upgrader.Upgrade(w, r, nil)
+	conn, err := upgrader.Upgrade(writer, request, nil)
 	if err != nil {
 		log.Println("WebSocket upgrade error:", err)
 		return
@@ -429,7 +494,7 @@ func main() {
 	router.Post("/endpoints", addCamera)
 	router.Get("/endpoints", getEndpoints)
 	router.Delete("/endpoints/{path}", deleteCameraEndpoint)
-	router.Post("/analysis", startAnalysis)
+	router.Post("/analysis/{cameraID}", startAnalysis)
 	router.Get("/ws/{path}", wsHandler)
 
 	server := &http.Server{
