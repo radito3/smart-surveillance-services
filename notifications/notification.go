@@ -22,15 +22,9 @@ import (
 	"github.com/go-chi/chi/middleware"
 )
 
-type RequestData struct {
-	CameraID  string           `json:"camera_id,omitempty"`
-	Receivers []ReceiverConfig `json:"receivers,omitempty"`
-}
-
 type ReceiverConfig struct {
 	UIPopup       bool        `json:"ui_popup,omitempty"` // default
 	eventsChannel chan string `json:"-"`
-	connOpen      bool        `json:"-"`
 
 	WebhookURL         string `json:"webhook_url,omitempty"`
 	WebhookTimeout     int64  `json:"webhook_timeout,omitempty"`     // default: 10s
@@ -43,7 +37,7 @@ type ReceiverConfig struct {
 	SmtpCredentials string `json:"smtp_credentials,omitempty"` // encrypted
 }
 
-var receivers map[string][]ReceiverConfig = make(map[string][]ReceiverConfig)
+var receivers []ReceiverConfig
 var privateKey *rsa.PrivateKey
 
 func init() {
@@ -59,87 +53,82 @@ func init() {
 	}
 }
 
-func addCameraConfig(writer http.ResponseWriter, request *http.Request) {
+func createConfig(writer http.ResponseWriter, request *http.Request) {
 	defer request.Body.Close()
 
-	var data RequestData
+	var data []ReceiverConfig
 	err := json.NewDecoder(request.Body).Decode(&data)
 	if err != nil {
 		http.Error(writer, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
 
-	if len(data.CameraID) == 0 {
-		http.Error(writer, "Missing required Camera ID", http.StatusBadRequest)
-		return
-	}
-
-	if len(data.Receivers) == 0 {
+	if len(data) == 0 {
 		http.Error(writer, "No receivers", http.StatusBadRequest)
 		return
 	}
 
-	_, present := receivers[data.CameraID]
-	if present {
-		http.Error(writer, fmt.Sprintf("Camera %s already configured", data.CameraID), http.StatusConflict)
-		return
+	for i := range data {
+		if data[i].UIPopup {
+			data[i].eventsChannel = make(chan string, 10)
+			break
+		}
 	}
-
-	receivers[data.CameraID] = data.Receivers
-	writer.WriteHeader(http.StatusCreated)
+	receivers = data
+	writer.WriteHeader(http.StatusOK)
 }
 
-func updateCameraConfig(writer http.ResponseWriter, request *http.Request) {
-	cameraID := chi.URLParam(request, "cameraID")
+func updateConfig(writer http.ResponseWriter, request *http.Request) {
 	defer request.Body.Close()
 
-	var data RequestData
+	var data []ReceiverConfig
 	err := json.NewDecoder(request.Body).Decode(&data)
 	if err != nil {
 		http.Error(writer, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
 
-	_, present := receivers[cameraID]
-	if !present {
-		http.Error(writer, fmt.Sprintf("Camera %s not found", cameraID), http.StatusNotFound)
-		return
-	}
+	var hasUiPopup bool
+	for i := range data {
+		if data[i].UIPopup {
+			hasUiPopup = true
+			var hasCurrentUiPopup bool
 
-outer:
-	for i := range data.Receivers {
-		if data.Receivers[i].UIPopup {
-			for j := range receivers[cameraID] {
-				if receivers[cameraID][j].connOpen {
-					data.Receivers[i].connOpen = true
-					data.Receivers[i].eventsChannel = receivers[cameraID][j].eventsChannel
-					break outer
+			for j := range receivers {
+				if receivers[j].eventsChannel != nil {
+					hasCurrentUiPopup = true
+					data[i].eventsChannel = receivers[j].eventsChannel
+					break
 				}
+			}
+			if hasCurrentUiPopup {
+				break
+			} else {
+				data[i].eventsChannel = make(chan string, 10)
 			}
 		}
 	}
 
-	receivers[cameraID] = data.Receivers
+	if !hasUiPopup {
+		for i := range receivers {
+			if receivers[i].eventsChannel != nil {
+				close(receivers[i].eventsChannel)
+			}
+		}
+	}
+
+	receivers = data
 	writer.WriteHeader(http.StatusOK)
 }
 
-func removeCameraConfig(writer http.ResponseWriter, request *http.Request) {
-	cameraID := chi.URLParam(request, "cameraID")
-
-	configs, present := receivers[cameraID]
-	if !present {
-		writer.WriteHeader(http.StatusNoContent)
-		return
-	}
-
-	for i := range configs {
-		if configs[i].connOpen {
-			configs[i].connOpen = false
-			close(configs[i].eventsChannel)
-			break
+func deleteConfig(writer http.ResponseWriter, request *http.Request) {
+	for i := range receivers {
+		if receivers[i].eventsChannel != nil {
+			close(receivers[i].eventsChannel)
 		}
 	}
-	delete(receivers, cameraID)
+
+	receivers = nil
 	writer.WriteHeader(http.StatusNoContent)
 }
 
@@ -149,13 +138,7 @@ func sendNotification(writer http.ResponseWriter, request *http.Request) {
 	cameraID := chi.URLParam(request, "cameraID")
 	log.Printf("[camera: %s] Received alert signal\n", cameraID)
 
-	config, present := receivers[cameraID]
-	if !present {
-		http.Error(writer, fmt.Sprintf("Camera %s not found", cameraID), http.StatusNotFound)
-		return
-	}
-
-	for _, receiver := range config {
+	for _, receiver := range receivers {
 		if len(receiver.SmtpServer) != 0 {
 			log.Printf("[camera: %s] Sending email to %s\n", cameraID, receiver.SmtpRecipient)
 			if err := sendEmail(cameraID, receiver); err != nil {
@@ -164,11 +147,11 @@ func sendNotification(writer http.ResponseWriter, request *http.Request) {
 		}
 
 		if receiver.UIPopup {
-			if receiver.connOpen {
-				log.Printf("[camera: %s] Sending UI alert\n", cameraID)
-				receiver.eventsChannel <- fmt.Sprintf("Camera %s has detected suspicious behaviour", cameraID)
-			} else {
-				log.Printf("[camera: %s] SSE channel not open\n", cameraID)
+			log.Printf("[camera: %s] Sending UI alert\n", cameraID)
+			select {
+			case receiver.eventsChannel <- fmt.Sprintf("Camera %s has detected suspicious behaviour", cameraID):
+			default:
+				log.Printf("[camera: %s] Unable to send UI alert: SSE channel closed\n", cameraID)
 			}
 		}
 
@@ -182,38 +165,19 @@ func sendNotification(writer http.ResponseWriter, request *http.Request) {
 	writer.WriteHeader(http.StatusOK)
 }
 
+// for future dev:
+// if multiple instances of the Web UI are supported, we need a pseudo-kafka message passing mechanism
+// we need to keep track of the currently open TCP connections (the Web UIs)
+// and distribute the notification messages to each one
+// the issue comes from the fact that the consumers may change dynamically (adding/removing)
 func notificationsPushChannel(w http.ResponseWriter, r *http.Request) {
-	cameraID := chi.URLParam(r, "cameraID")
-
-	config, present := receivers[cameraID]
-	if !present {
-		http.Error(w, fmt.Sprintf("Camera %s not found", cameraID), http.StatusNotFound)
-		return
-	}
-
 	var eventsChannel chan string
-	var receiverIdx int
-	for i := range config {
-		if config[i].UIPopup {
-			if config[i].connOpen {
-				http.Error(w, "SSE connection already open", http.StatusConflict)
-				return
-			}
-			config[i].eventsChannel = make(chan string)
-			config[i].connOpen = true
-			eventsChannel = config[i].eventsChannel
-			receiverIdx = i
+	for i := range receivers {
+		if receivers[i].UIPopup {
+			eventsChannel = receivers[i].eventsChannel
 			break
 		}
 	}
-
-	defer func() {
-		config := receivers[cameraID]
-		if config[receiverIdx].connOpen {
-			config[receiverIdx].connOpen = false
-			close(config[receiverIdx].eventsChannel)
-		}
-	}()
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -232,13 +196,14 @@ func notificationsPushChannel(w http.ResponseWriter, r *http.Request) {
 	ticker := time.NewTicker(20 * time.Second)
 	defer ticker.Stop()
 
-	for config[receiverIdx].connOpen {
+	for {
 		select {
 		case message, chanOpen := <-eventsChannel:
-			if chanOpen {
-				fmt.Fprintf(w, "data: %s\n\n", message)
-				flusher.Flush() // Push event to client
+			if !chanOpen {
+				return
 			}
+			fmt.Fprintf(w, "data: %s\n\n", message)
+			flusher.Flush() // Push event to client
 		case <-ticker.C:
 			fmt.Fprint(w, ": keep-alive\n\n")
 			flusher.Flush()
@@ -343,11 +308,11 @@ func main() {
 	router.Use(middleware.CleanPath)
 	router.Use(middleware.Heartbeat("/public/ping"))
 
-	router.Post("/configs", addCameraConfig)
-	router.Patch("/configs/{cameraID}", updateCameraConfig)
-	router.Delete("/configs/{cameraID}", removeCameraConfig)
+	router.Post("/config", createConfig)
+	router.Patch("/config", updateConfig)
+	router.Delete("/config", deleteConfig)
 	router.Post("/alert/{cameraID}", sendNotification)
-	router.Get("/notifications/{cameraID}", notificationsPushChannel)
+	router.Get("/notifications-stream", notificationsPushChannel)
 
 	server := &http.Server{
 		Addr:              ":8080",

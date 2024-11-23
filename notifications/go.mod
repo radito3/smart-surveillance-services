@@ -1,4 +1,4 @@
-module github.com/sss
+module github.com/smart-surveillance/notification-service
 
 go 1.23
 
