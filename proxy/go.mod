@@ -1,4 +1,4 @@
-module github.com/sss/proxy
+module github.com/smart-surveillance/proxy
 
 go 1.23
 

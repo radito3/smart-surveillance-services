@@ -154,7 +154,7 @@ func addCamera(writer http.ResponseWriter, request *http.Request) {
 			if len(port) != 0 {
 				port = ":" + parsedSourceURL.Port()
 			}
-			config.Source = parsedSourceURL.Scheme + "://" + getNewHostname(hostname, i) + port + "/" + config.Path
+			config.Source = parsedSourceURL.Scheme + "://" + getNewHostname(hostname, currentInstanceIdx) + port + "/" + config.Path
 			config.RunOnPublishRestart = false
 			config.Record = false
 			config.RunOnPublish = ""
@@ -395,6 +395,108 @@ func startAnalysis(writer http.ResponseWriter, request *http.Request) {
 	writer.WriteHeader(http.StatusCreated)
 }
 
+func stopAnalysis(writer http.ResponseWriter, request *http.Request) {
+	cameraID := chi.URLParam(request, "cameraID")
+
+	deplomentsClient := k8sClient.AppsV1().Deployments("ml-analysis")
+	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+	defer cancel()
+
+	// the default graceful termination timeout is 30s
+	err := deplomentsClient.Delete(ctx, "ml-pipeline-"+cameraID, metav1.DeleteOptions{})
+	if err != nil {
+		http.Error(writer, fmt.Sprintf("failed to delete Deployment: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	writer.WriteHeader(http.StatusOK)
+}
+
+func anonymyze(writer http.ResponseWriter, request *http.Request) {
+	streamPath := chi.URLParam(request, "path")
+
+	totalInstances, err := getStatefulSetInstances()
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	hostname := os.Getenv("HOSTNAME")
+
+	currentInstanceIdxStr := hostname[strings.LastIndexByte(hostname, '-')+1:]
+	currentInstanceIdx, _ := strconv.Atoi(currentInstanceIdxStr)
+
+	var config CameraEndpointConfig
+	config.Path = "anon-" + streamPath
+	config.Source = "publisher"
+
+	err = sendConfigRequest(config, "localhost")
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	for i := 0; i < int(totalInstances); i++ {
+		if i != currentInstanceIdx {
+			config.Source = "rtsp://" + getNewHostname(hostname, currentInstanceIdx) + ":8554/" + config.Path
+
+			err = sendConfigRequest(config, getNewHostname(hostname, i))
+			if err != nil {
+				// should we stop or continue here?
+				http.Error(writer, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+	}
+
+	err = createAnonymizationPod(hostname, streamPath)
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	writer.WriteHeader(http.StatusOK)
+}
+
+func createAnonymizationPod(podHostname, streamPath string) error {
+	log.Println("Creating Pod anonymization-filter-" + streamPath)
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "anonymization-filter-" + streamPath,
+			Namespace: "hub",
+			Labels: map[string]string{
+				"app": "anonymization-filter",
+			},
+		},
+		Spec: corev1.PodSpec{
+			RestartPolicy: corev1.RestartPolicyOnFailure,
+			Containers: []corev1.Container{
+				{
+					Name:  "anonymization-filter",
+					Image: "radito3/ss-anonymisation-filter:1.0.0",
+					Args: []string{
+						"rtsp://mediamtx.hub.svc.cluster.local/" + streamPath,
+						"rtsp://" + podHostname + ".mediamtx-headless.hub.svc.cluster.local/anon-" + streamPath,
+					},
+				},
+			},
+		},
+	}
+
+	podsClient := k8sClient.CoreV1().Pods("hub")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err := podsClient.Create(ctx, pod, metav1.CreateOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to create Pod: %v", err)
+	}
+
+	log.Println("Created Pod anonymization-filter-" + streamPath)
+	return nil
+}
+
 func transcodeToMPEGTS(streamURL string, wsConn *websocket.Conn) {
 	// https://trac.ffmpeg.org/wiki/StreamingGuide
 	cmd := exec.Command("ffmpeg", "-re", "-i", streamURL, "-f", "mpegts", "-codec:v", "mpeg1video", "-")
@@ -495,6 +597,8 @@ func main() {
 	router.Get("/endpoints", getEndpoints)
 	router.Delete("/endpoints/{path}", deleteCameraEndpoint)
 	router.Post("/analysis/{cameraID}", startAnalysis)
+	router.Delete("/analysis/{cameraID}", stopAnalysis)
+	router.Post("/anonymyze/{path}", anonymyze)
 	router.Get("/ws/{path}", wsHandler)
 
 	server := &http.Server{
