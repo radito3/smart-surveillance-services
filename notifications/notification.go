@@ -74,6 +74,9 @@ func createConfig(writer http.ResponseWriter, request *http.Request) {
 			break
 		}
 	}
+
+	// TODO: write to a volume, so that if the notification service has more than 1 instance,
+	//  every one will have an up-to-date view of the data
 	receivers = data
 	writer.WriteHeader(http.StatusOK)
 }
@@ -117,6 +120,8 @@ func updateConfig(writer http.ResponseWriter, request *http.Request) {
 		}
 	}
 
+	// TODO: write to a volume, so that if the notification service has more than 1 instance,
+	//  every one will have an up-to-date view of the data
 	receivers = data
 	writer.WriteHeader(http.StatusOK)
 }
@@ -128,6 +133,8 @@ func deleteConfig(writer http.ResponseWriter, request *http.Request) {
 		}
 	}
 
+	// TODO: write to a volume, so that if the notification service has more than 1 instance,
+	//  every one will have an up-to-date view of the data
 	receivers = nil
 	writer.WriteHeader(http.StatusNoContent)
 }
@@ -166,7 +173,7 @@ func sendNotification(writer http.ResponseWriter, request *http.Request) {
 }
 
 // for future dev:
-// if multiple instances of the Web UI are supported, we need a pseudo-kafka message passing mechanism
+// if multiple instances of the Web UI are supported, we need a message passing mechanism
 // we need to keep track of the currently open TCP connections (the Web UIs)
 // and distribute the notification messages to each one
 // the issue comes from the fact that the consumers may change dynamically (adding/removing)
