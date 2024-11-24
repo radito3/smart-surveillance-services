@@ -17,4 +17,4 @@ EXPOSE 1935 8080 8554 8004
 COPY start.sh /start.sh
 RUN chmod +x /start.sh
 
-CMD ["/start.sh"]
+ENTRYPOINT ["/start.sh"]
