@@ -154,13 +154,13 @@ func addCamera(writer http.ResponseWriter, request *http.Request) {
 			if len(port) != 0 {
 				port = ":" + parsedSourceURL.Port()
 			}
-			config.Source = parsedSourceURL.Scheme + "://" + getNewHostname(hostname, currentInstanceIdx) + port + "/" + config.Path
+			config.Source = parsedSourceURL.Scheme + "://" + getPodFQDN(hostname, currentInstanceIdx) + port + "/" + config.Path
 			config.RunOnPublishRestart = false
 			config.Record = false
 			config.RunOnPublish = ""
 			config.RunOnInit = ""
 
-			err = sendConfigRequest(config, getNewHostname(hostname, i))
+			err = sendConfigRequest(config, getPodFQDN(hostname, i))
 			if err != nil {
 				// should we stop or continue here?
 				http.Error(writer, err.Error(), http.StatusInternalServerError)
@@ -195,7 +195,7 @@ func sendConfigRequest(config CameraEndpointConfig, host string) error {
 	return nil
 }
 
-func getNewHostname(hostname string, newSuffix int) string {
+func getPodFQDN(hostname string, newSuffix int) string {
 	podName := hostname[:strings.LastIndexByte(hostname, '-')]
 	return fmt.Sprintf("%s-%d.mediamtx-headless.hub.svc.cluster.local", podName, newSuffix)
 }
@@ -330,7 +330,7 @@ func deleteCameraEndpoint(writer http.ResponseWriter, request *http.Request) {
 
 	for i := 0; i < int(totalInstances); i++ {
 		if i != currentInstanceIdx {
-			req, _ = http.NewRequest(http.MethodDelete, "http://"+getNewHostname(hostname, i)+":9997/v3/config/paths/delete/"+cameraPath, nil)
+			req, _ = http.NewRequest(http.MethodDelete, "http://"+getPodFQDN(hostname, i)+":9997/v3/config/paths/delete/"+cameraPath, nil)
 
 			resp, err = http.DefaultClient.Do(req)
 			if err != nil {
@@ -438,9 +438,9 @@ func anonymyze(writer http.ResponseWriter, request *http.Request) {
 
 	for i := 0; i < int(totalInstances); i++ {
 		if i != currentInstanceIdx {
-			config.Source = "rtsp://" + getNewHostname(hostname, currentInstanceIdx) + ":8554/" + config.Path
+			config.Source = "rtsp://" + getPodFQDN(hostname, currentInstanceIdx) + ":8554/" + config.Path
 
-			err = sendConfigRequest(config, getNewHostname(hostname, i))
+			err = sendConfigRequest(config, getPodFQDN(hostname, i))
 			if err != nil {
 				// should we stop or continue here?
 				http.Error(writer, err.Error(), http.StatusInternalServerError)
