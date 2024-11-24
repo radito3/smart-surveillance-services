@@ -275,11 +275,11 @@ func createMlPipelineDeployment(streamURL, analysisMode, cameraID string) error 
 		},
 	}
 
-	deplomentsClient := k8sClient.AppsV1().Deployments("ml-analysis")
+	deploymentsClient := k8sClient.AppsV1().Deployments("ml-analysis")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	_, err := deplomentsClient.Create(ctx, deployment, metav1.CreateOptions{})
+	_, err := deploymentsClient.Create(ctx, deployment, metav1.CreateOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to create Deployment: %v", err)
 	}
@@ -398,12 +398,12 @@ func startAnalysis(writer http.ResponseWriter, request *http.Request) {
 func stopAnalysis(writer http.ResponseWriter, request *http.Request) {
 	cameraID := chi.URLParam(request, "cameraID")
 
-	deplomentsClient := k8sClient.AppsV1().Deployments("ml-analysis")
+	deploymentsClient := k8sClient.AppsV1().Deployments("ml-analysis")
 	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
 	defer cancel()
 
 	// the default graceful termination timeout is 30s
-	err := deplomentsClient.Delete(ctx, "ml-pipeline-"+cameraID, metav1.DeleteOptions{})
+	err := deploymentsClient.Delete(ctx, "ml-pipeline-"+cameraID, metav1.DeleteOptions{})
 	if err != nil {
 		http.Error(writer, fmt.Sprintf("failed to delete Deployment: %v", err), http.StatusInternalServerError)
 		return
