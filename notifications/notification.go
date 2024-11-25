@@ -56,6 +56,11 @@ func init() {
 func createConfig(writer http.ResponseWriter, request *http.Request) {
 	defer request.Body.Close()
 
+	if len(receivers) != 0 {
+		http.Error(writer, "Configuration already present", http.StatusConflict)
+		return
+	}
+
 	var data []ReceiverConfig
 	err := json.NewDecoder(request.Body).Decode(&data)
 	if err != nil {
@@ -78,7 +83,7 @@ func createConfig(writer http.ResponseWriter, request *http.Request) {
 	// TODO: write to a volume, so that if the notification service has more than 1 instance,
 	//  every one will have an up-to-date view of the data
 	receivers = data
-	writer.WriteHeader(http.StatusOK)
+	writer.WriteHeader(http.StatusCreated)
 }
 
 func updateConfig(writer http.ResponseWriter, request *http.Request) {
