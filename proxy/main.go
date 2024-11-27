@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/go-chi/cors"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -517,11 +519,11 @@ func transcodeToHLS(protocol, streamPath string) error {
 	if len(port) == 0 {
 		return fmt.Errorf("unsupported protocol %s on path %s", protocol, streamPath)
 	}
-	streamURL := protocol + "//localhost:" + port + "/" + streamPath
+	streamURL := protocol + "://localhost:" + port + "/" + streamPath
 
 	// https://trac.ffmpeg.org/wiki/StreamingGuide
+	// https://trac.ffmpeg.org/wiki/Encode/H.264
 	cmd := exec.Command("ffmpeg",
-		// "-re",
 		"-i", streamURL,
 		"-c:v", "libx264",
 		"-an", // Disable audio
@@ -529,10 +531,10 @@ func transcodeToHLS(protocol, streamPath string) error {
 		"-preset", "veryfast",
 		"-crf", "25", // h.264 constant rate factor (compression ratio) (default: 23)
 		"-f", "hls",
-		"-hls_time", "3", // seconds for each segment
-		"-hls_list_size", "10", // number of segments to keep
+		"-hls_time", "5", // seconds for each segment
+		"-hls_list_size", "30", // number of segments to keep
 		"-hls_flags", "delete_segments",
-		"./hls/"+streamPath+".m3u8")
+		"hls/"+streamPath+".m3u8")
 	cmd.Stdout = log.Writer()
 	cmd.Stderr = log.Writer()
 
@@ -552,9 +554,17 @@ func main() {
 
 	router := chi.NewRouter()
 
+	router.Use(middleware.Logger)
 	router.Use(middleware.Recoverer)
 	router.Use(middleware.CleanPath)
 	router.Use(middleware.Heartbeat("/public/ping"))
+	router.Use(cors.Handler(cors.Options{
+		AllowedOrigins:   []string{"http://*"},
+		AllowedMethods:   []string{"GET", "POST", "DELETE", "OPTIONS"},
+		AllowedHeaders:   []string{"Authorization", "Content-Type"},
+		AllowCredentials: false,
+		MaxAge:           300,
+	}))
 
 	router.Post("/endpoints", addCamera)
 	router.Get("/endpoints", getEndpoints)
@@ -563,8 +573,11 @@ func main() {
 	router.Delete("/analysis/{cameraID}", stopAnalysis)
 	router.Post("/anonymyze/{path}", anonymyze)
 
+	workingDir, _ := os.Getwd()
+	fs := http.Dir(filepath.Join(workingDir, "hls") + "/")
+
 	router.Route("/static", func(r chi.Router) {
-		r.Get("/*", http.StripPrefix("/static", http.FileServer(http.Dir("./hls/"))).ServeHTTP)
+		r.Get("/*", http.StripPrefix("/static", http.FileServer(fs)).ServeHTTP)
 	})
 
 	server := &http.Server{
