@@ -20,21 +20,22 @@ import (
 
 	"github.com/go-chi/chi"
 	"github.com/go-chi/chi/middleware"
+	"github.com/go-chi/cors"
 )
 
 type ReceiverConfig struct {
-	UIPopup       bool        `json:"ui_popup,omitempty"` // default
+	UIPopup       bool        `json:"uiPopup,omitempty"` // default
 	eventsChannel chan string `json:"-"`
 
-	WebhookURL         string `json:"webhook_url,omitempty"`
-	WebhookTimeout     int64  `json:"webhook_timeout,omitempty"`     // default: 10s
-	WebhookAuthType    string `json:"webhook_auth_type,omitempty"`   // default: basic
-	WebhookCredentials string `json:"webhook_credentials,omitempty"` // encrypted
+	WebhookURL         string `json:"webhookUrl,omitempty"`
+	WebhookTimeout     int64  `json:"webhookRequestTimeout,omitempty"` // default: 10s
+	WebhookAuthType    string `json:"webhookAuthType,omitempty"`       // default: basic
+	WebhookCredentials string `json:"webhookCredentials,omitempty"`    // encrypted
 
-	SmtpServer      string `json:"smtp_server,omitempty"`
-	SmtpSender      string `json:"smtp_sender,omitempty"`
-	SmtpRecipient   string `json:"smtp_recipient,omitempty"`
-	SmtpCredentials string `json:"smtp_credentials,omitempty"` // encrypted
+	SmtpServer      string `json:"smtpServer,omitempty"`
+	SmtpSender      string `json:"smtpSender,omitempty"`
+	SmtpRecipient   string `json:"smtpRecipient,omitempty"`
+	SmtpCredentials string `json:"smtpCredentials,omitempty"` // encrypted
 }
 
 var receivers []ReceiverConfig
@@ -61,35 +62,39 @@ func createConfig(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 
-	var data []ReceiverConfig
+	var data struct {
+		Receivers []ReceiverConfig `json:"config"`
+	}
 	err := json.NewDecoder(request.Body).Decode(&data)
 	if err != nil {
 		http.Error(writer, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
 
-	if len(data) == 0 {
+	if len(data.Receivers) == 0 {
 		http.Error(writer, "No receivers", http.StatusBadRequest)
 		return
 	}
 
-	for i := range data {
-		if data[i].UIPopup {
-			data[i].eventsChannel = make(chan string, 10)
+	for i := range data.Receivers {
+		if data.Receivers[i].UIPopup {
+			data.Receivers[i].eventsChannel = make(chan string, 10)
 			break
 		}
 	}
 
 	// TODO: write to a volume, so that if the notification service has more than 1 instance,
 	//  every one will have an up-to-date view of the data
-	receivers = data
+	receivers = data.Receivers
 	writer.WriteHeader(http.StatusCreated)
 }
 
 func updateConfig(writer http.ResponseWriter, request *http.Request) {
 	defer request.Body.Close()
 
-	var data []ReceiverConfig
+	var data struct {
+		Receivers []ReceiverConfig `json:"config"`
+	}
 	err := json.NewDecoder(request.Body).Decode(&data)
 	if err != nil {
 		http.Error(writer, "Invalid JSON", http.StatusBadRequest)
@@ -97,22 +102,22 @@ func updateConfig(writer http.ResponseWriter, request *http.Request) {
 	}
 
 	var hasUiPopup bool
-	for i := range data {
-		if data[i].UIPopup {
+	for i := range data.Receivers {
+		if data.Receivers[i].UIPopup {
 			hasUiPopup = true
 			var hasCurrentUiPopup bool
 
 			for j := range receivers {
 				if receivers[j].eventsChannel != nil {
 					hasCurrentUiPopup = true
-					data[i].eventsChannel = receivers[j].eventsChannel
+					data.Receivers[i].eventsChannel = receivers[j].eventsChannel
 					break
 				}
 			}
 			if hasCurrentUiPopup {
 				break
 			} else {
-				data[i].eventsChannel = make(chan string, 10)
+				data.Receivers[i].eventsChannel = make(chan string, 10)
 			}
 		}
 	}
@@ -127,7 +132,7 @@ func updateConfig(writer http.ResponseWriter, request *http.Request) {
 
 	// TODO: write to a volume, so that if the notification service has more than 1 instance,
 	//  every one will have an up-to-date view of the data
-	receivers = data
+	receivers = data.Receivers
 	writer.WriteHeader(http.StatusOK)
 }
 
@@ -205,6 +210,9 @@ func notificationsPushChannel(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, ": keep-alive\n\n")
 	flusher.Flush()
 
+	interruptChan := make(chan os.Signal, 1)
+	signal.Notify(interruptChan, syscall.SIGINT, syscall.SIGTERM)
+
 	ticker := time.NewTicker(20 * time.Second)
 	defer ticker.Stop()
 
@@ -219,6 +227,8 @@ func notificationsPushChannel(w http.ResponseWriter, r *http.Request) {
 		case <-ticker.C:
 			fmt.Fprint(w, ": keep-alive\n\n")
 			flusher.Flush()
+		case <-interruptChan:
+			return
 		case <-r.Context().Done():
 			return
 		}
@@ -316,9 +326,17 @@ func main() {
 
 	router := chi.NewRouter()
 
+	router.Use(middleware.Logger)
 	router.Use(middleware.Recoverer)
 	router.Use(middleware.CleanPath)
 	router.Use(middleware.Heartbeat("/public/ping"))
+	router.Use(cors.Handler(cors.Options{
+		AllowedOrigins:   []string{"http://*"},
+		AllowedMethods:   []string{"GET", "POST", "PATCH", "DELETE", "OPTIONS"},
+		AllowedHeaders:   []string{"Authorization", "Content-Type"},
+		AllowCredentials: false,
+		MaxAge:           300,
+	}))
 
 	router.Post("/config", createConfig)
 	router.Patch("/config", updateConfig)
@@ -327,7 +345,7 @@ func main() {
 	router.Get("/notifications-stream", notificationsPushChannel)
 
 	server := &http.Server{
-		Addr:              ":8080",
+		Addr:              ":8081",
 		Handler:           router,
 		ReadTimeout:       5 * time.Second,
 		ReadHeaderTimeout: 2 * time.Second,
