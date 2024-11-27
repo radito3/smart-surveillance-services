@@ -4,7 +4,6 @@ go 1.23
 
 require (
 	github.com/go-chi/chi/v5 v5.1.0
-	github.com/gorilla/websocket v1.5.3
 	k8s.io/api v0.31.2
 	k8s.io/apimachinery v0.31.2
 	k8s.io/client-go v0.31.2

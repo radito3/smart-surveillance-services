@@ -20,7 +20,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/gorilla/websocket"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -64,6 +63,7 @@ type PathConfig struct {
 var k8sClient *kubernetes.Clientset
 var mtxSourceToPort map[string]string
 var portToProtocol map[string]string
+var hlsSubprocessPids map[string]*os.Process
 
 func init() {
 	config, err := rest.InClusterConfig()
@@ -89,6 +89,7 @@ func init() {
 		"1935": "rtmp",
 		"8888": "http",
 	}
+	hlsSubprocessPids = make(map[string]*os.Process)
 }
 
 func addCamera(writer http.ResponseWriter, request *http.Request) {
@@ -169,6 +170,11 @@ func addCamera(writer http.ResponseWriter, request *http.Request) {
 		}
 	}
 
+	if strings.HasPrefix(data.Source, "rtsp") || strings.HasPrefix(data.Source, "rtmp") {
+		if err = transcodeToHLS(parsedSourceURL.Scheme, config.Path); err != nil {
+			log.Println(err)
+		}
+	}
 	writer.WriteHeader(http.StatusOK)
 }
 
@@ -292,6 +298,10 @@ func int32Ptr(i int32) *int32 { return &i }
 
 func deleteCameraEndpoint(writer http.ResponseWriter, request *http.Request) {
 	cameraPath := chi.URLParam(request, "path")
+
+	if process, present := hlsSubprocessPids[cameraPath]; present {
+		process.Signal(os.Interrupt)
+	}
 
 	req, _ := http.NewRequest(http.MethodDelete, "http://localhost:9997/v3/config/paths/delete/"+cameraPath, nil)
 
@@ -497,88 +507,41 @@ func createAnonymizationPod(podHostname, streamPath string) error {
 	return nil
 }
 
-func transcodeToMPEGTS(streamURL string, wsConn *websocket.Conn) {
-	// https://trac.ffmpeg.org/wiki/StreamingGuide
-	cmd := exec.Command("ffmpeg", "-re", "-i", streamURL, "-f", "mpegts", "-codec:v", "mpeg1video", "-")
-	// for HLS:
-	// ffmpeg -re -i $streamURL -c:v libx264 -preset veryfast -crf 23 -f hls -hls_time 2 -hls_list_size 5 -hls_flags delete_segments output.m3u8
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		log.Println("Error creating stdout pipe:", err)
-		return
-	}
-
-	if err := cmd.Start(); err != nil {
-		log.Println("Error starting FFmpeg:", err)
-		return
-	}
-	defer cmd.Process.Signal(os.Interrupt)
-
-	buf := make([]byte, 4096)
-	for {
-		n, err := stdout.Read(buf)
-		if err != nil {
-			log.Println("Error reading from FFmpeg stdout:", err)
-			break
-		}
-
-		if err := wsConn.WriteMessage(websocket.BinaryMessage, buf[:n]); err != nil {
-			log.Println("Error sending WebSocket message:", err)
-			break
-		}
-	}
-}
-
-func wsHandler(writer http.ResponseWriter, request *http.Request) {
-	streamPath := chi.URLParam(request, "path")
-
-	resp, err := http.Get("http://localhost:9997/v3/paths/list")
-	if err != nil {
-		http.Error(writer, fmt.Sprintf("could not get paths list: %v", err), http.StatusInternalServerError)
-		return
-	}
-	defer resp.Body.Close()
-
-	var pathsResp PathsListResponse
-	// ignore any parsing errors, because we assume MediaMTX returns valid responses
-	json.NewDecoder(resp.Body).Decode(&pathsResp)
-
+func transcodeToHLS(protocol, streamPath string) error {
 	var port string
-	var sourceType string
-	found := false
-
-	// paging?
-	for _, item := range pathsResp.Items {
-		if item.Name == streamPath {
-			sourceType = item.Source.Type
-			port = mtxSourceToPort[item.Source.Type]
-			found = true
-			break
+	for mtxPort, supportedProtocol := range portToProtocol {
+		if protocol == supportedProtocol {
+			port = mtxPort
 		}
 	}
-
-	if !found {
-		http.Error(writer, fmt.Sprintf("Stream path %s not found", streamPath), http.StatusNotFound)
-		return
+	if len(port) == 0 {
+		return fmt.Errorf("unsupported protocol %s on path %s", protocol, streamPath)
 	}
+	streamURL := protocol + "//localhost:" + port + "/" + streamPath
 
-	streamURL := portToProtocol[port] + "://localhost:" + mtxSourceToPort[sourceType] + "/" + streamPath
+	// https://trac.ffmpeg.org/wiki/StreamingGuide
+	cmd := exec.Command("ffmpeg",
+		// "-re",
+		"-i", streamURL,
+		"-c:v", "libx264",
+		"-an", // Disable audio
+		"-tune", "zerolatency",
+		"-preset", "veryfast",
+		"-crf", "25", // h.264 constant rate factor (compression ratio) (default: 23)
+		"-f", "hls",
+		"-hls_time", "3", // seconds for each segment
+		"-hls_list_size", "10", // number of segments to keep
+		"-hls_flags", "delete_segments",
+		"./hls/"+streamPath+".m3u8")
+	cmd.Stdout = log.Writer()
+	cmd.Stderr = log.Writer()
 
-	var upgrader = websocket.Upgrader{
-		CheckOrigin: func(r *http.Request) bool {
-			return true // Allow all connections
-		},
-	}
-	conn, err := upgrader.Upgrade(writer, request, nil)
+	err := cmd.Start()
 	if err != nil {
-		log.Println("WebSocket upgrade error:", err)
-		return
+		return fmt.Errorf("error transcoding video %s: %v", streamPath, err)
 	}
-	defer conn.Close()
-
-	log.Printf("Client connected to stream path: %s", streamPath)
-	transcodeToMPEGTS(streamURL, conn)
+	hlsSubprocessPids[streamPath] = cmd.Process
+	return nil
 }
 
 func main() {
@@ -599,7 +562,10 @@ func main() {
 	router.Post("/analysis/{cameraID}", startAnalysis)
 	router.Delete("/analysis/{cameraID}", stopAnalysis)
 	router.Post("/anonymyze/{path}", anonymyze)
-	router.Get("/ws/{path}", wsHandler)
+
+	router.Route("/static", func(r chi.Router) {
+		r.Get("/*", http.StripPrefix("/static", http.FileServer(http.Dir("./hls/"))).ServeHTTP)
+	})
 
 	server := &http.Server{
 		Addr:              ":8080",
