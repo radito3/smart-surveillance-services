@@ -278,6 +278,7 @@ func sendRequest(cameraID string, config ReceiverConfig) error {
 	return nil
 }
 
+// can test with https://aiosmtpd.aio-libs.org/en/stable/index.html
 func sendEmail(cameraID string, config ReceiverConfig) error {
 	// https://myaccount.google.com/apppasswords
 	// Navigate to App Password Generator, designate an app name such as "security project," and obtain a 16-digit password.

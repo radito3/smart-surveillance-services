@@ -210,7 +210,7 @@ func getPodFQDN(hostname string, newSuffix int) string {
 func getEndpoints(writer http.ResponseWriter, request *http.Request) {
 	resp, err := http.Get("http://localhost:9997/v3/paths/list")
 	if err != nil {
-		http.Error(writer, fmt.Sprintf("could not send GET /list request: %v", err), http.StatusInternalServerError)
+		http.Error(writer, fmt.Sprintf("could not get endpoints: %v", err), http.StatusInternalServerError)
 		return
 	}
 
@@ -218,7 +218,7 @@ func getEndpoints(writer http.ResponseWriter, request *http.Request) {
 
 	_, err = io.CopyN(writer, resp.Body, resp.ContentLength)
 	if err != nil {
-		http.Error(writer, fmt.Sprintf("could not send response to socket: %v", err), http.StatusInternalServerError)
+		log.Printf("Could not send response to socket: %v\n", err)
 	}
 }
 
