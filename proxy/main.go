@@ -8,7 +8,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/http/httputil"
 	"net/url"
 	"os"
 	"os/exec"
@@ -172,7 +171,7 @@ func addCamera(writer http.ResponseWriter, request *http.Request) {
 		}
 	}
 
-	if strings.HasPrefix(data.Source, "rtsp") || strings.HasPrefix(data.Source, "rtmp") {
+	if parsedSourceURL.Scheme == "rtsp" || parsedSourceURL.Scheme == "rtmp" {
 		if err = transcodeToHLS(parsedSourceURL.Scheme, config.Path); err != nil {
 			log.Println(err)
 		}
@@ -209,12 +208,18 @@ func getPodFQDN(hostname string, newSuffix int) string {
 }
 
 func getEndpoints(writer http.ResponseWriter, request *http.Request) {
-	// this will not be the full config, just a summary
-	addr, _ := url.ParseRequestURI("http://localhost:9997/v3/paths/list")
+	resp, err := http.Get("http://localhost:9997/v3/paths/list")
+	if err != nil {
+		http.Error(writer, fmt.Sprintf("could not send GET /list request: %v", err), http.StatusInternalServerError)
+		return
+	}
 
-	proxy := httputil.NewSingleHostReverseProxy(addr)
+	defer resp.Body.Close()
 
-	proxy.ServeHTTP(writer, request)
+	_, err = io.CopyN(writer, resp.Body, resp.ContentLength)
+	if err != nil {
+		http.Error(writer, fmt.Sprintf("could not send response to socket: %v", err), http.StatusInternalServerError)
+	}
 }
 
 func getStatefulSetInstances() (int32, error) {
@@ -465,6 +470,10 @@ func anonymyze(writer http.ResponseWriter, request *http.Request) {
 	if err != nil {
 		http.Error(writer, err.Error(), http.StatusInternalServerError)
 		return
+	}
+
+	if err = transcodeToHLS("rtsp", "anon-"+streamPath); err != nil {
+		log.Println(err)
 	}
 
 	writer.WriteHeader(http.StatusOK)
