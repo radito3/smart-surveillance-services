@@ -21,6 +21,7 @@ import (
 	"github.com/go-chi/chi"
 	"github.com/go-chi/chi/middleware"
 	"github.com/go-chi/cors"
+	"github.com/gorilla/websocket"
 )
 
 type ReceiverConfig struct {
@@ -196,40 +197,45 @@ func notificationsPushChannel(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
-		return
+	upgrader := websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool {
+			return true // Allow connections from all origins
+		},
 	}
 
-	fmt.Fprintf(w, ": keep-alive\n\n")
-	flusher.Flush()
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Println("Error upgrading to WebSocket:", err)
+		return
+	}
+	defer conn.Close()
 
 	interruptChan := make(chan os.Signal, 1)
 	signal.Notify(interruptChan, syscall.SIGINT, syscall.SIGTERM)
 
-	ticker := time.NewTicker(20 * time.Second)
+	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case message, chanOpen := <-eventsChannel:
 			if !chanOpen {
+				log.Println("events channel closed. terminating connection")
 				return
 			}
-			fmt.Fprintf(w, "data: %s\n\n", message)
-			flusher.Flush() // Push event to client
+			err = conn.WriteMessage(websocket.TextMessage, []byte(message))
+			if err != nil {
+				log.Println("Error sending message:", err)
+			}
 		case <-ticker.C:
-			fmt.Fprint(w, ": keep-alive\n\n")
-			flusher.Flush()
+			err := conn.WriteMessage(websocket.PingMessage, []byte("keep-alive"))
+			if err != nil {
+				log.Println("Error sending ping:", err)
+			}
 		case <-interruptChan:
 			return
 		case <-r.Context().Done():
+			log.Println("client closed the connection")
 			return
 		}
 	}
