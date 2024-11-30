@@ -23,6 +23,7 @@ import (
 	"github.com/go-chi/cors"
 
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -243,6 +244,9 @@ func createMlPipelineDeployment(streamURL, analysisMode, cameraID string) error 
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "ml-pipeline-" + cameraID,
 			Namespace: "ml-analysis",
+			Labels: map[string]string{
+				"app": "analyser-deployment",
+			},
 		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: int32Ptr(1),
@@ -265,7 +269,7 @@ func createMlPipelineDeployment(streamURL, analysisMode, cameraID string) error 
 							Args: []string{
 								streamURL,
 								analysisMode,
-								"http://notification-service.hub.svc.cluster.local/alert/" + cameraID,
+								"http://notification-service.hub.svc.cluster.local:8081/alert/" + cameraID,
 							},
 							Env: []corev1.EnvVar{
 								{
@@ -308,6 +312,7 @@ func deleteCameraEndpoint(writer http.ResponseWriter, request *http.Request) {
 
 	if process, present := hlsSubprocessPids[cameraPath]; present {
 		process.Signal(os.Interrupt)
+		delete(hlsSubprocessPids, cameraPath)
 	}
 
 	req, _ := http.NewRequest(http.MethodDelete, "http://localhost:9997/v3/config/paths/delete/"+cameraPath, nil)
@@ -466,7 +471,7 @@ func anonymyze(writer http.ResponseWriter, request *http.Request) {
 		}
 	}
 
-	err = createAnonymizationPod(hostname, streamPath)
+	err = createAnonymizationJob(hostname, streamPath)
 	if err != nil {
 		http.Error(writer, err.Error(), http.StatusInternalServerError)
 		return
@@ -479,42 +484,57 @@ func anonymyze(writer http.ResponseWriter, request *http.Request) {
 	writer.WriteHeader(http.StatusOK)
 }
 
-func createAnonymizationPod(podHostname, streamPath string) error {
-	log.Println("Creating Pod anonymization-filter-" + streamPath)
+func createAnonymizationJob(podHostname, streamPath string) error {
+	log.Println("Creating Job anonymization-filter-" + streamPath)
 
-	pod := &corev1.Pod{
+	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "anonymization-filter-" + streamPath,
 			Namespace: "hub",
 			Labels: map[string]string{
-				"app": "anonymization-filter",
+				"app": "anonymization-filter-job",
 			},
 		},
-		Spec: corev1.PodSpec{
-			RestartPolicy: corev1.RestartPolicyOnFailure,
-			Containers: []corev1.Container{
-				{
-					Name:  "anonymization-filter",
-					Image: "radito3/ss-anonymisation-filter:1.0.0",
-					Args: []string{
-						"rtsp://mediamtx.hub.svc.cluster.local/" + streamPath,
-						"rtsp://" + podHostname + ".mediamtx-headless.hub.svc.cluster.local/anon-" + streamPath,
+		Spec: batchv1.JobSpec{
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					"app": "anonymization-filter",
+				},
+			},
+			BackoffLimit: int32Ptr(3),
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						"app": "anonymization-filter",
+					},
+				},
+				Spec: corev1.PodSpec{
+					RestartPolicy: corev1.RestartPolicyOnFailure,
+					Containers: []corev1.Container{
+						{
+							Name:  "anonymization-filter",
+							Image: "radito3/ss-anonymisation-filter:1.0.0",
+							Args: []string{
+								"rtsp://mediamtx.hub.svc.cluster.local/" + streamPath,
+								"rtsp://" + podHostname + ".mediamtx-headless.hub.svc.cluster.local/anon-" + streamPath,
+							},
+						},
 					},
 				},
 			},
 		},
 	}
 
-	podsClient := k8sClient.CoreV1().Pods("hub")
+	jobsClient := k8sClient.BatchV1().Jobs("hub")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	_, err := podsClient.Create(ctx, pod, metav1.CreateOptions{})
+	_, err := jobsClient.Create(ctx, job, metav1.CreateOptions{})
 	if err != nil {
-		return fmt.Errorf("failed to create Pod: %v", err)
+		return fmt.Errorf("failed to create Job: %v", err)
 	}
 
-	log.Println("Created Pod anonymization-filter-" + streamPath)
+	log.Println("Created Job anonymization-filter-" + streamPath)
 	return nil
 }
 
