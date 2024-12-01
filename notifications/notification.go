@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rsa"
 	"crypto/x509"
@@ -25,8 +26,8 @@ import (
 )
 
 type ReceiverConfig struct {
-	UIPopup       bool        `json:"uiPopup,omitempty"` // default
-	eventsChannel chan string `json:"-"`
+	UIPopup       bool              `json:"uiPopup,omitempty"` // default
+	eventsChannel chan Notification `json:"-"`
 
 	WebhookURL         string `json:"webhookUrl,omitempty"`
 	WebhookTimeout     int64  `json:"webhookRequestTimeout,omitempty"` // default: 10s
@@ -37,6 +38,11 @@ type ReceiverConfig struct {
 	SmtpSender      string `json:"smtpSender,omitempty"`
 	SmtpRecipient   string `json:"smtpRecipient,omitempty"`
 	SmtpCredentials string `json:"smtpCredentials,omitempty"` // encrypted
+}
+
+type Notification struct {
+	CameraID string `json:"cameraID"`
+	Message  string `json:"message"`
 }
 
 var receivers []ReceiverConfig
@@ -79,7 +85,7 @@ func createConfig(writer http.ResponseWriter, request *http.Request) {
 
 	for i := range data.Receivers {
 		if data.Receivers[i].UIPopup {
-			data.Receivers[i].eventsChannel = make(chan string, 10)
+			data.Receivers[i].eventsChannel = make(chan Notification, 10)
 			break
 		}
 	}
@@ -118,7 +124,7 @@ func updateConfig(writer http.ResponseWriter, request *http.Request) {
 			if hasCurrentUiPopup {
 				break
 			} else {
-				data.Receivers[i].eventsChannel = make(chan string, 10)
+				data.Receivers[i].eventsChannel = make(chan Notification, 10)
 			}
 		}
 	}
@@ -166,8 +172,9 @@ func sendNotification(writer http.ResponseWriter, request *http.Request) {
 
 		if receiver.UIPopup {
 			log.Printf("[camera: %s] Sending UI alert\n", cameraID)
+			notification := Notification{cameraID, fmt.Sprintf("Camera %s has detected suspicious behaviour", cameraID)}
 			select {
-			case receiver.eventsChannel <- fmt.Sprintf("Camera %s has detected suspicious behaviour", cameraID):
+			case receiver.eventsChannel <- notification:
 			default:
 				log.Printf("[camera: %s] Unable to send UI alert: SSE channel closed\n", cameraID)
 			}
@@ -189,7 +196,7 @@ func sendNotification(writer http.ResponseWriter, request *http.Request) {
 // and distribute the notification messages to each one
 // the issue comes from the fact that the consumers may change dynamically (adding/removing)
 func notificationsPushChannel(w http.ResponseWriter, r *http.Request) {
-	var eventsChannel chan string
+	var eventsChannel chan Notification
 	for i := range receivers {
 		if receivers[i].UIPopup {
 			eventsChannel = receivers[i].eventsChannel
@@ -223,7 +230,10 @@ func notificationsPushChannel(w http.ResponseWriter, r *http.Request) {
 				log.Println("events channel closed. terminating connection")
 				return
 			}
-			err = conn.WriteMessage(websocket.TextMessage, []byte(message))
+			var buff bytes.Buffer
+			json.NewEncoder(&buff).Encode(message)
+
+			err = conn.WriteMessage(websocket.TextMessage, buff.Bytes())
 			if err != nil {
 				log.Println("Error sending message:", err)
 			}
