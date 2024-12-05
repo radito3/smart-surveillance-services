@@ -30,3 +30,4 @@ go.work.sum
 .idea/
 venv/
 proxy/hls/
+__pycache__/

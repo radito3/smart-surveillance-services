@@ -20,4 +20,5 @@ while True:
 
     processed_frame = processor(frame)
 
+    # FIXME: this gives a broken pipe error
     sys.stdout.buffer.write(processed_frame.tobytes())

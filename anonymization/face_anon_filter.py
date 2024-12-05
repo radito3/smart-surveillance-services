@@ -1,5 +1,6 @@
 import cv2
 import torch
+import numpy as np
 from facenet_pytorch import MTCNN
 
 
@@ -20,8 +21,6 @@ class FaceAnonymizer:
         device = torch.device('cpu')
         if torch.cuda.is_available():
             device = torch.device('cuda')
-        elif torch.backends.mps.is_available():
-            device = torch.device('mps')
         return device
 
     @staticmethod
@@ -45,12 +44,14 @@ class FaceAnonymizer:
         boxes, _ = self.detector.detect(image)
         self.update_faces(boxes)
 
+        writable_image = np.copy(image)
         for box in self.current_faces:
             x1, y1, x2, y2 = [int(b) for b in box]
             match effect:
                 case 'blur':
-                    image = self.blur_face(image, x1, y1, x2, y2)
+                    # FIXME the numpy array that holds the frame is read-only
+                    writable_image = self.blur_face(writable_image, x1, y1, x2, y2)
                 case 'pixelate':
-                    image = self.pixelate_face(image, x1, y1, x2, y2)
+                    writable_image = self.pixelate_face(writable_image, x1, y1, x2, y2)
 
-        return image
+        return writable_image
