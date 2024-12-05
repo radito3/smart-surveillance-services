@@ -25,6 +25,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -50,8 +51,8 @@ type CameraEndpointConfig struct {
 }
 
 type PathsListResponse struct {
-	Pages    int64        `json:"pageCount"`
 	NumItems int64        `json:"itemCount"`
+	Pages    int64        `json:"pageCount"`
 	Items    []PathConfig `json:"items"`
 }
 
@@ -103,6 +104,8 @@ func addCamera(writer http.ResponseWriter, request *http.Request) {
 		http.Error(writer, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
+
+	// TODO: check if it already exists, and return 409
 
 	parsedSourceURL, err := url.Parse(data.Source)
 	if err != nil {
@@ -396,6 +399,7 @@ func startAnalysis(writer http.ResponseWriter, request *http.Request) {
 
 	// paging?
 	for _, item := range pathsResp.Items {
+		// TODO: check if it already exists, and return 409
 		if item.Name == "camera-"+cameraID {
 			streamURL += mtxSourceToPort[item.Source.Type] + "/camera-" + cameraID
 			found = true
@@ -426,6 +430,10 @@ func stopAnalysis(writer http.ResponseWriter, request *http.Request) {
 
 	// the default graceful termination timeout is 30s
 	err := deploymentsClient.Delete(ctx, "ml-pipeline-"+cameraID, metav1.DeleteOptions{})
+	if errors.IsNotFound(err) {
+		http.Error(writer, fmt.Sprintf("Deployment %s not found", "ml-pipeline-"+cameraID), http.StatusNotFound)
+		return
+	}
 	if err != nil {
 		http.Error(writer, fmt.Sprintf("failed to delete Deployment: %v", err), http.StatusInternalServerError)
 		return
