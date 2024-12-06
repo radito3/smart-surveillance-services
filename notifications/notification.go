@@ -243,6 +243,7 @@ func notificationsPushChannel(w http.ResponseWriter, r *http.Request) {
 				log.Println("Error sending ping:", err)
 			}
 		case <-interruptChan:
+			log.Println("process interrupted. closing connections")
 			return
 		case <-r.Context().Done():
 			log.Println("client closed the connection")
