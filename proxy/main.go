@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -66,7 +67,9 @@ type PathConfig struct {
 var k8sClient *kubernetes.Clientset
 var mtxSourceToPort map[string]string
 var portToProtocol map[string]string
+
 var hlsSubprocessPids map[string]*os.Process
+var subprocessesLock sync.Mutex
 
 func init() {
 	config, err := rest.InClusterConfig()
@@ -313,10 +316,12 @@ func int32Ptr(i int32) *int32 { return &i }
 func deleteCameraEndpoint(writer http.ResponseWriter, request *http.Request) {
 	cameraPath := chi.URLParam(request, "path")
 
+	subprocessesLock.Lock()
 	if process, present := hlsSubprocessPids[cameraPath]; present {
 		process.Signal(os.Interrupt)
 		delete(hlsSubprocessPids, cameraPath)
 	}
+	subprocessesLock.Unlock()
 
 	req, _ := http.NewRequest(http.MethodDelete, "http://localhost:9997/v3/config/paths/delete/"+cameraPath, nil)
 
@@ -579,7 +584,10 @@ func transcodeToHLS(protocol, streamPath string) error {
 	if err != nil {
 		return fmt.Errorf("error transcoding video %s: %v", streamPath, err)
 	}
+
+	subprocessesLock.Lock()
 	hlsSubprocessPids[streamPath] = cmd.Process
+	subprocessesLock.Unlock()
 	return nil
 }
 
