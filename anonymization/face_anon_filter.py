@@ -1,6 +1,5 @@
 import cv2
 import torch
-import numpy as np
 from facenet_pytorch import MTCNN
 
 
@@ -11,7 +10,6 @@ class FaceAnonymizer:
         self.detector = MTCNN(keep_all=True, device=self.__get_device())
         self.current_faces = []
 
-    # FIXME: this still drops the rectangles sometimes, leading to periods of non-anonymized faces
     def update_faces(self, new_faces):
         if new_faces is not None and len(new_faces) > 0:
             self.current_faces = new_faces
@@ -21,6 +19,7 @@ class FaceAnonymizer:
         device = torch.device('cpu')
         if torch.cuda.is_available():
             device = torch.device('cuda')
+        # Apple MPS has issues with the AdaptiveAvgPool2d layer of MTCNN
         return device
 
     @staticmethod
@@ -40,17 +39,16 @@ class FaceAnonymizer:
         image[y1:y2, x1:x2] = pixelated_face
         return image
 
-    def __call__(self, image, effect='blur'):
-        boxes, _ = self.detector.detect(image)
+    def __call__(self, frame, effect='blur'):
+        boxes, _ = self.detector.detect(frame)
         self.update_faces(boxes)
 
-        writable_image = np.copy(image)
         for box in self.current_faces:
             x1, y1, x2, y2 = [int(b) for b in box]
             match effect:
                 case 'blur':
-                    writable_image = self.blur_face(writable_image, x1, y1, x2, y2)
+                    frame = self.blur_face(frame, x1, y1, x2, y2)
                 case 'pixelate':
-                    writable_image = self.pixelate_face(writable_image, x1, y1, x2, y2)
+                    frame = self.pixelate_face(frame, x1, y1, x2, y2)
 
-        return writable_image
+        return frame
