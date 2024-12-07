@@ -108,7 +108,27 @@ func addCamera(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 
-	// TODO: check if it already exists, and return 409
+	resp, err := http.Get("http://localhost:9997/v3/paths/list")
+	if err != nil {
+		http.Error(writer, fmt.Sprintf("could not get paths list: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+
+	var pathsResp PathsListResponse
+	err = json.NewDecoder(resp.Body).Decode(&pathsResp)
+	if err != nil {
+		http.Error(writer, fmt.Sprintf("could not read MediaMTX response: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// paging?
+	for _, item := range pathsResp.Items {
+		if item.Name == "camera-"+data.ID {
+			http.Error(writer, fmt.Sprintf("camera %s already exists", data.ID), http.StatusConflict)
+			return
+		}
+	}
 
 	parsedSourceURL, err := url.Parse(data.Source)
 	if err != nil {
@@ -198,7 +218,6 @@ func sendConfigRequest(config CameraEndpointConfig, host string) error {
 	}
 	defer res.Body.Close()
 
-	// TODO: handle the case where the camera endpoint is already created
 	if res.StatusCode/100 != 2 {
 		bodyBytes, err := io.ReadAll(res.Body)
 		if err != nil {
@@ -303,6 +322,9 @@ func createMlPipelineDeployment(streamURL, analysisMode, cameraID string) error 
 	defer cancel()
 
 	_, err := deploymentsClient.Create(ctx, deployment, metav1.CreateOptions{})
+	if errors.IsAlreadyExists(err) || errors.IsConflict(err) {
+		return err
+	}
 	if err != nil {
 		return fmt.Errorf("failed to create Deployment: %v", err)
 	}
@@ -396,15 +418,17 @@ func startAnalysis(writer http.ResponseWriter, request *http.Request) {
 	defer resp.Body.Close()
 
 	var pathsResp PathsListResponse
-	// ignore any parsing errors, because we assume MediaMTX returns valid responses
-	json.NewDecoder(resp.Body).Decode(&pathsResp)
+	err = json.NewDecoder(resp.Body).Decode(&pathsResp)
+	if err != nil {
+		http.Error(writer, fmt.Sprintf("could not read MediaMTX response: %v", err), http.StatusInternalServerError)
+		return
+	}
 
 	streamURL := "http://mediamtx.hub.svc.cluster.local:"
 	found := false
 
 	// paging?
 	for _, item := range pathsResp.Items {
-		// TODO: check if it already exists, and return 409
 		if item.Name == "camera-"+cameraID {
 			streamURL += mtxSourceToPort[item.Source.Type] + "/camera-" + cameraID
 			found = true
@@ -418,6 +442,10 @@ func startAnalysis(writer http.ResponseWriter, request *http.Request) {
 	}
 
 	err = createMlPipelineDeployment(streamURL, analysisMode, cameraID)
+	if errors.IsAlreadyExists(err) || errors.IsConflict(err) {
+		http.Error(writer, fmt.Sprintf("analysis for camera %s already started", cameraID), http.StatusConflict)
+		return
+	}
 	if err != nil {
 		http.Error(writer, err.Error(), http.StatusInternalServerError)
 		return
@@ -485,6 +513,10 @@ func anonymyze(writer http.ResponseWriter, request *http.Request) {
 	}
 
 	err = createAnonymizationJob(hostname, streamPath)
+	if errors.IsAlreadyExists(err) || errors.IsConflict(err) {
+		http.Error(writer, fmt.Sprintf("anonymyzation for endpoint %s already started", streamPath), http.StatusConflict)
+		return
+	}
 	if err != nil {
 		http.Error(writer, err.Error(), http.StatusInternalServerError)
 		return
@@ -543,6 +575,9 @@ func createAnonymizationJob(podHostname, streamPath string) error {
 	defer cancel()
 
 	_, err := jobsClient.Create(ctx, job, metav1.CreateOptions{})
+	if errors.IsAlreadyExists(err) || errors.IsConflict(err) {
+		return err
+	}
 	if err != nil {
 		return fmt.Errorf("failed to create Job: %v", err)
 	}
