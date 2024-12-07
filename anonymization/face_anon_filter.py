@@ -49,7 +49,6 @@ class FaceAnonymizer:
             x1, y1, x2, y2 = [int(b) for b in box]
             match effect:
                 case 'blur':
-                    # FIXME the numpy array that holds the frame is read-only
                     writable_image = self.blur_face(writable_image, x1, y1, x2, y2)
                 case 'pixelate':
                     writable_image = self.pixelate_face(writable_image, x1, y1, x2, y2)
