@@ -207,12 +207,10 @@ func addCamera(writer http.ResponseWriter, request *http.Request) {
 }
 
 func sendConfigRequest(config CameraEndpointConfig, host string) error {
-	cameraPayload, err := json.Marshal(config)
-	if err != nil {
-		return fmt.Errorf("could not serialize config request: %v", err)
-	}
+	var buff bytes.Buffer
+	json.NewEncoder(&buff).Encode(config)
 
-	res, err := http.Post("http://"+host+":9997/v3/config/paths/add/"+config.Path, "application/json", bytes.NewReader(cameraPayload))
+	res, err := http.Post("http://"+host+":9997/v3/config/paths/add/"+config.Path, "application/json", &buff)
 	if err != nil {
 		return fmt.Errorf("could not send config request: %v", err)
 	}
@@ -318,7 +316,8 @@ func createMlPipelineDeployment(streamURL, analysisMode, cameraID string) error 
 	}
 
 	deploymentsClient := k8sClient.AppsV1().Deployments("ml-analysis")
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// large timeout due to the size of the image
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
 	_, err := deploymentsClient.Create(ctx, deployment, metav1.CreateOptions{})
@@ -571,7 +570,8 @@ func createAnonymizationJob(podHostname, streamPath string) error {
 	}
 
 	jobsClient := k8sClient.BatchV1().Jobs("hub")
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// large timeout due to the size of the image
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
 	_, err := jobsClient.Create(ctx, job, metav1.CreateOptions{})
