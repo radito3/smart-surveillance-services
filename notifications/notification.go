@@ -55,10 +55,15 @@ func init() {
 	}
 
 	block, _ := pem.Decode(privateKeyData)
-	privateKey, err = x509.ParsePKCS1PrivateKey(block.Bytes)
+	if block == nil {
+		log.Fatalln("failed to decode private key")
+	}
+
+	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
 	if err != nil {
 		log.Fatalf("failed to parse private key: %v", err)
 	}
+	privateKey = key.(*rsa.PrivateKey)
 }
 
 func createConfig(writer http.ResponseWriter, request *http.Request) {
