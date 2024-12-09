@@ -423,13 +423,13 @@ func startAnalysis(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 
-	streamURL := "http://mediamtx.hub.svc.cluster.local:"
+	var port string
 	found := false
 
 	// paging?
 	for _, item := range pathsResp.Items {
 		if item.Name == "camera-"+cameraID {
-			streamURL += mtxSourceToPort[item.Source.Type] + "/camera-" + cameraID
+			port = mtxSourceToPort[item.Source.Type]
 			found = true
 			break
 		}
@@ -439,6 +439,8 @@ func startAnalysis(writer http.ResponseWriter, request *http.Request) {
 		http.Error(writer, fmt.Sprintf("Camera with ID %s not found", cameraID), http.StatusNotFound)
 		return
 	}
+
+	streamURL := fmt.Sprintf("%s://mediamtx.hub.svc.cluster.local:%s/camera-%s", portToProtocol[port], port, cameraID)
 
 	err = createMlPipelineDeployment(streamURL, analysisMode, cameraID)
 	if errors.IsAlreadyExists(err) || errors.IsConflict(err) {
@@ -540,11 +542,6 @@ func createAnonymizationJob(podHostname, streamPath string) error {
 			},
 		},
 		Spec: batchv1.JobSpec{
-			Selector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					"app": "anonymization-filter",
-				},
-			},
 			BackoffLimit: int32Ptr(3),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
@@ -559,8 +556,8 @@ func createAnonymizationJob(podHostname, streamPath string) error {
 							Name:  "anonymization-filter",
 							Image: "radito3/ss-anonymisation-filter:1.0.0",
 							Args: []string{
-								"rtsp://mediamtx.hub.svc.cluster.local/" + streamPath,
-								"rtsp://" + podHostname + ".mediamtx-headless.hub.svc.cluster.local/anon-" + streamPath,
+								"rtsp://mediamtx.hub.svc.cluster.local:8554/" + streamPath,
+								"rtsp://" + podHostname + ".mediamtx-headless.hub.svc.cluster.local:8554/anon-" + streamPath,
 							},
 						},
 					},
