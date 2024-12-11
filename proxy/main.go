@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	stdErrors "errors"
 	"fmt"
 	"io"
 	"log"
@@ -28,6 +29,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
@@ -63,6 +65,8 @@ type PathConfig struct {
 		Type string `json:"type"`
 	} `json:"source"`
 }
+
+var ErrAlreadyExists = stdErrors.New("path already exists")
 
 var k8sClient *kubernetes.Clientset
 var mtxSourceToPort map[string]string
@@ -173,6 +177,10 @@ func addCamera(writer http.ResponseWriter, request *http.Request) {
 
 	err = sendConfigRequest(config, "localhost")
 	if err != nil {
+		if stdErrors.Is(err, ErrAlreadyExists) {
+			http.Error(writer, err.Error(), http.StatusConflict)
+			return
+		}
 		http.Error(writer, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -191,6 +199,10 @@ func addCamera(writer http.ResponseWriter, request *http.Request) {
 
 			err = sendConfigRequest(config, getPodFQDN(hostname, i))
 			if err != nil {
+				if stdErrors.Is(err, ErrAlreadyExists) {
+					http.Error(writer, err.Error(), http.StatusConflict)
+					return
+				}
 				// should we stop or continue here?
 				http.Error(writer, err.Error(), http.StatusInternalServerError)
 				return
@@ -217,11 +229,17 @@ func sendConfigRequest(config CameraEndpointConfig, host string) error {
 	defer res.Body.Close()
 
 	if res.StatusCode/100 != 2 {
-		bodyBytes, err := io.ReadAll(res.Body)
+		var respErr struct {
+			Error string `json:"error"`
+		}
+		err := json.NewDecoder(res.Body).Decode(&respErr)
 		if err != nil {
 			return fmt.Errorf("could not read config response body: %v", err)
 		}
-		return fmt.Errorf("config response error: %s", string(bodyBytes))
+		if respErr.Error == "path already exists" {
+			return ErrAlreadyExists
+		}
+		return fmt.Errorf("config response error: %s", respErr.Error)
 	}
 	return nil
 }
@@ -496,6 +514,10 @@ func anonymyze(writer http.ResponseWriter, request *http.Request) {
 
 	err = sendConfigRequest(config, "localhost")
 	if err != nil {
+		if stdErrors.Is(err, ErrAlreadyExists) {
+			http.Error(writer, err.Error(), http.StatusConflict)
+			return
+		}
 		http.Error(writer, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -506,6 +528,10 @@ func anonymyze(writer http.ResponseWriter, request *http.Request) {
 
 			err = sendConfigRequest(config, getPodFQDN(hostname, i))
 			if err != nil {
+				if stdErrors.Is(err, ErrAlreadyExists) {
+					http.Error(writer, err.Error(), http.StatusConflict)
+					return
+				}
 				// should we stop or continue here?
 				http.Error(writer, err.Error(), http.StatusInternalServerError)
 				return
@@ -513,7 +539,7 @@ func anonymyze(writer http.ResponseWriter, request *http.Request) {
 		}
 	}
 
-	err = createAnonymizationJob(hostname, streamPath)
+	job, err := createAnonymizationJob(hostname, streamPath)
 	if errors.IsAlreadyExists(err) || errors.IsConflict(err) {
 		http.Error(writer, fmt.Sprintf("anonymyzation for endpoint %s already started", streamPath), http.StatusConflict)
 		return
@@ -523,15 +549,28 @@ func anonymyze(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 
-	if err = transcodeToHLS("rtsp", "anon-"+streamPath); err != nil {
-		log.Println(err)
+	selector := metav1.FormatLabelSelector(job.Spec.Selector)
+	log.Printf("Watching Pods for Job %s with selector %s...\n", "anonymization-filter-"+streamPath, selector)
+
+	err = watchJobUntillRunning(request.Context(), selector, "anonymization-filter-"+streamPath)
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+		return
 	}
+
+	go func() {
+		// give the job some time to start publishing
+		time.Sleep(5 * time.Second)
+		if err = transcodeToHLS("rtsp", "anon-"+streamPath); err != nil {
+			log.Println(err)
+		}
+	}()
 
 	writer.WriteHeader(http.StatusOK)
 }
 
-func createAnonymizationJob(podHostname, streamPath string) error {
-	log.Println("Creating Job anonymization-filter-" + streamPath)
+func createAnonymizationJob(podHostname, streamPath string) (*batchv1.Job, error) {
+	log.Println("Creating Job anonymization-filter-" + streamPath + " for Pod " + podHostname)
 
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -571,15 +610,50 @@ func createAnonymizationJob(podHostname, streamPath string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	_, err := jobsClient.Create(ctx, job, metav1.CreateOptions{})
+	resource, err := jobsClient.Create(ctx, job, metav1.CreateOptions{})
 	if errors.IsAlreadyExists(err) || errors.IsConflict(err) {
-		return err
+		return nil, err
 	}
 	if err != nil {
-		return fmt.Errorf("failed to create Job: %v", err)
+		return nil, fmt.Errorf("failed to create Job: %v", err)
 	}
 
 	log.Println("Created Job anonymization-filter-" + streamPath)
+	return resource, nil
+}
+
+func watchJobUntillRunning(ctx context.Context, selector, name string) error {
+	podsClient := k8sClient.CoreV1().Pods("hub")
+	watcher, err := podsClient.Watch(ctx, metav1.ListOptions{
+		LabelSelector: selector,
+	})
+	if err != nil {
+		return fmt.Errorf("could not watch Job %s pods: %v", name, err)
+	}
+	defer watcher.Stop()
+
+	for event := range watcher.ResultChan() {
+		switch event.Type {
+		case watch.Added, watch.Modified:
+			pod, ok := event.Object.(*corev1.Pod)
+			if !ok {
+				return fmt.Errorf("unexpected object type in watch: %T", event.Object)
+			}
+			if pod.Status.Phase == corev1.PodRunning {
+				log.Printf("Pod %s is running.\n", pod.Name)
+				return nil
+			} else {
+				log.Printf("Pod %s status: %s\n", pod.Name, pod.Status.Phase)
+			}
+		case watch.Deleted:
+			pod, ok := event.Object.(*corev1.Pod)
+			if ok {
+				log.Printf("Pod %s was deleted.\n", pod.Name)
+			}
+		case watch.Error:
+			return fmt.Errorf("error watching pods: %v", err)
+		}
+	}
 	return nil
 }
 
