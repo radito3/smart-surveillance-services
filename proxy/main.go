@@ -312,10 +312,6 @@ func createMlPipelineDeployment(streamURL, analysisMode, cameraID string) error 
 							},
 							Env: []corev1.EnvVar{
 								{
-									Name:  "ACTIVITY_WHITELIST",
-									Value: "1-30",
-								},
-								{
 									Name:  "PYTHONUNBUFFERED",
 									Value: "1",
 								},
@@ -329,6 +325,12 @@ func createMlPipelineDeployment(streamURL, analysisMode, cameraID string) error 
 				},
 			},
 		},
+	}
+
+	if value, present := os.LookupEnv("ACTIVITY_WHITELIST"); present {
+		deployment.Spec.Template.Spec.Containers[0].Env = append(deployment.Spec.Template.Spec.Containers[0].Env,
+			corev1.EnvVar{Name: "ACTIVITY_WHITELIST", Value: value},
+		)
 	}
 
 	deploymentsClient := k8sClient.AppsV1().Deployments("ml-analysis")
