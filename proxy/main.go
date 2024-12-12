@@ -66,7 +66,11 @@ type PathConfig struct {
 	} `json:"source"`
 }
 
-var ErrAlreadyExists = stdErrors.New("path already exists")
+type ErrorResponse struct {
+	Error string `json:"error"`
+}
+
+var ErrAlreadyExists = stdErrors.New("camera already exists")
 
 var k8sClient *kubernetes.Clientset
 var mtxSourceToPort map[string]string
@@ -124,14 +128,6 @@ func addCamera(writer http.ResponseWriter, request *http.Request) {
 	if err != nil {
 		http.Error(writer, fmt.Sprintf("could not read MediaMTX response: %v", err), http.StatusInternalServerError)
 		return
-	}
-
-	// paging?
-	for _, item := range pathsResp.Items {
-		if item.Name == "camera-"+data.ID {
-			http.Error(writer, fmt.Sprintf("camera %s already exists", data.ID), http.StatusConflict)
-			return
-		}
 	}
 
 	parsedSourceURL, err := url.Parse(data.Source)
@@ -211,9 +207,12 @@ func addCamera(writer http.ResponseWriter, request *http.Request) {
 	}
 
 	if parsedSourceURL.Scheme == "rtsp" || parsedSourceURL.Scheme == "rtmp" {
-		if err = transcodeToHLS(parsedSourceURL.Scheme, config.Path); err != nil {
-			log.Println(err)
-		}
+		go func() {
+			time.Sleep(time.Second)
+			if err = transcodeToHLS(parsedSourceURL.Scheme, config.Path); err != nil {
+				log.Println(err)
+			}
+		}()
 	}
 	writer.WriteHeader(http.StatusOK)
 }
@@ -222,6 +221,7 @@ func sendConfigRequest(config CameraEndpointConfig, host string) error {
 	var buff bytes.Buffer
 	json.NewEncoder(&buff).Encode(config)
 
+	log.Println("Sending config request to " + host)
 	res, err := http.Post("http://"+host+":9997/v3/config/paths/add/"+config.Path, "application/json", &buff)
 	if err != nil {
 		return fmt.Errorf("could not send config request: %v", err)
@@ -229,12 +229,10 @@ func sendConfigRequest(config CameraEndpointConfig, host string) error {
 	defer res.Body.Close()
 
 	if res.StatusCode/100 != 2 {
-		var respErr struct {
-			Error string `json:"error"`
-		}
+		var respErr ErrorResponse
 		err := json.NewDecoder(res.Body).Decode(&respErr)
 		if err != nil {
-			return fmt.Errorf("could not read config response body: %v", err)
+			return fmt.Errorf("could not read config response %d body: %v", res.StatusCode, err)
 		}
 		if respErr.Error == "path already exists" {
 			return ErrAlreadyExists
@@ -377,12 +375,13 @@ func deleteCameraEndpoint(writer http.ResponseWriter, request *http.Request) {
 	}
 
 	if resp.StatusCode == http.StatusInternalServerError {
-		bodyBytes, err := io.ReadAll(resp.Body)
+		var respErr ErrorResponse
+		err := json.NewDecoder(resp.Body).Decode(&respErr)
 		if err != nil {
 			http.Error(writer, fmt.Sprintf("could not read config response body: %v", err), http.StatusInternalServerError)
 			return
 		}
-		http.Error(writer, fmt.Sprintf("config response error: %s", string(bodyBytes)), http.StatusInternalServerError)
+		http.Error(writer, fmt.Sprintf("config response error: %s", respErr.Error), http.StatusInternalServerError)
 		return
 	}
 
@@ -409,12 +408,13 @@ func deleteCameraEndpoint(writer http.ResponseWriter, request *http.Request) {
 			defer resp.Body.Close()
 
 			if resp.StatusCode == http.StatusInternalServerError {
-				bodyBytes, err := io.ReadAll(resp.Body)
+				var respErr ErrorResponse
+				err := json.NewDecoder(resp.Body).Decode(&respErr)
 				if err != nil {
 					http.Error(writer, fmt.Sprintf("could not read config response body: %v", err), http.StatusInternalServerError)
 					return
 				}
-				http.Error(writer, fmt.Sprintf("config response error: %s", string(bodyBytes)), http.StatusInternalServerError)
+				http.Error(writer, fmt.Sprintf("config response error: %s", respErr.Error), http.StatusInternalServerError)
 				return
 			}
 		}
@@ -558,6 +558,7 @@ func anonymyze(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 
+	// this should not be here, as anonymisation is intended for recordings only
 	go func() {
 		// give the job some time to start publishing
 		time.Sleep(5 * time.Second)
@@ -624,9 +625,7 @@ func createAnonymizationJob(podHostname, streamPath string) (*batchv1.Job, error
 
 func watchJobUntillRunning(ctx context.Context, selector, name string) error {
 	podsClient := k8sClient.CoreV1().Pods("hub")
-	watcher, err := podsClient.Watch(ctx, metav1.ListOptions{
-		LabelSelector: selector,
-	})
+	watcher, err := podsClient.Watch(ctx, metav1.ListOptions{LabelSelector: selector})
 	if err != nil {
 		return fmt.Errorf("could not watch Job %s pods: %v", name, err)
 	}
