@@ -208,7 +208,7 @@ func addCamera(writer http.ResponseWriter, request *http.Request) {
 
 	if parsedSourceURL.Scheme == "rtsp" || parsedSourceURL.Scheme == "rtmp" {
 		go func() {
-			time.Sleep(time.Second)
+			time.Sleep(5 * time.Second)
 			if err = transcodeToHLS(parsedSourceURL.Scheme, config.Path); err != nil {
 				log.Println(err)
 			}
