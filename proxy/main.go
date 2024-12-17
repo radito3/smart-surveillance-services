@@ -11,12 +11,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -35,19 +33,16 @@ import (
 )
 
 type CameraEndpointRequest struct {
-	ID                string `json:"ID"`
-	Source            string `json:"source"`
-	EnableTranscoding bool   `json:"enableTranscoding,omitempty"`
-	Record            bool   `json:"record,omitempty"`
-	MaxReaders        int64  `json:"maxReaders,omitempty"`
+	ID         string `json:"ID"`
+	Source     string `json:"source"`
+	Record     bool   `json:"record,omitempty"`
+	MaxReaders int64  `json:"maxReaders,omitempty"`
 }
 
 type CameraEndpointConfig struct {
 	Path                       string `json:"name"`
 	Source                     string `json:"source,omitempty"`
 	MaxReaders                 int64  `json:"maxReaders,omitempty"`
-	RunOnPublish               string `json:"runOnPublish,omitempty"`
-	RunOnPublishRestart        bool   `json:"runOnPublishRestart,omitempty"`
 	Record                     bool   `json:"record,omitempty"`
 	RunOnInit                  string `json:"runOnInit,omitempty"`
 	RunOnRecordSegmentComplete string `json:"runOnRecordSegmentComplete,omitempty"`
@@ -76,9 +71,6 @@ var k8sClient *kubernetes.Clientset
 var mtxSourceToPort map[string]string
 var portToProtocol map[string]string
 
-var hlsSubprocessPids map[string]*os.Process
-var subprocessesLock sync.Mutex
-
 func init() {
 	config, err := rest.InClusterConfig()
 	if err != nil {
@@ -103,7 +95,6 @@ func init() {
 		"1935": "rtmp",
 		"8888": "http",
 	}
-	hlsSubprocessPids = make(map[string]*os.Process)
 }
 
 func addCamera(writer http.ResponseWriter, request *http.Request) {
@@ -151,18 +142,6 @@ func addCamera(writer http.ResponseWriter, request *http.Request) {
 	config.Path = "camera-" + url.PathEscape(data.ID)
 	config.MaxReaders = data.MaxReaders
 	config.Source = data.Source
-	if data.EnableTranscoding {
-		config.RunOnPublishRestart = true
-		config.RunOnPublish = "ffmpeg -i rtsp://localhost:8554/" + config.Path + " -map 0:v -map 0:a " +
-			"-b:v:0 500k -maxrate:v:0 500k -bufsize:v:0 1000k -s:v:0 640x360 -c:v:0 libx264 " +
-			"-b:v:1 1000k -maxrate:v:1 1000k -bufsize:v:1 2000k -s:v:1 1280x720 -c:v:1 libx264 " +
-			"-b:v:2 2000k -maxrate:v:2 2000k -bufsize:v:2 4000k -s:v:2 1920x1080 -c:v:2 libx264 " +
-			"-c:a aac -b:a 128k -f hls -hls_time 4 -hls_list_size 5 -hls_flags delete_segments " +
-			"-var_stream_map \"v:0,a:0 v:1,a:1 v:2,a:2\" " +
-			"-master_pl_name master.m3u8 " +
-			"-hls_segment_filename /" + config.Path + "/stream_%v/segment_%d.ts " +
-			"/" + config.Path + "/stream_%v/playlist.m3u8"
-	}
 	if data.Record {
 		// TODO: run rclone config with the user-provided data
 		config.Record = true
@@ -188,9 +167,7 @@ func addCamera(writer http.ResponseWriter, request *http.Request) {
 				port = ":" + parsedSourceURL.Port()
 			}
 			config.Source = parsedSourceURL.Scheme + "://" + getPodFQDN(hostname, currentInstanceIdx) + port + "/" + config.Path
-			config.RunOnPublishRestart = false
 			config.Record = false
-			config.RunOnPublish = ""
 			config.RunOnInit = ""
 
 			err = sendConfigRequest(config, getPodFQDN(hostname, i))
@@ -206,14 +183,6 @@ func addCamera(writer http.ResponseWriter, request *http.Request) {
 		}
 	}
 
-	if parsedSourceURL.Scheme == "rtsp" || parsedSourceURL.Scheme == "rtmp" {
-		go func() {
-			time.Sleep(5 * time.Second)
-			if err = transcodeToHLS(parsedSourceURL.Scheme, config.Path); err != nil {
-				log.Println(err)
-			}
-		}()
-	}
 	writer.WriteHeader(http.StatusOK)
 }
 
@@ -354,13 +323,6 @@ func int32Ptr(i int32) *int32 { return &i }
 
 func deleteCameraEndpoint(writer http.ResponseWriter, request *http.Request) {
 	cameraPath := chi.URLParam(request, "path")
-
-	subprocessesLock.Lock()
-	if process, present := hlsSubprocessPids[cameraPath]; present {
-		process.Signal(os.Interrupt)
-		delete(hlsSubprocessPids, cameraPath)
-	}
-	subprocessesLock.Unlock()
 
 	req, _ := http.NewRequest(http.MethodDelete, "http://localhost:9997/v3/config/paths/delete/"+cameraPath, nil)
 
@@ -560,15 +522,6 @@ func anonymyze(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 
-	// this should not be here, as anonymisation is intended for recordings only
-	go func() {
-		// give the job some time to start publishing
-		time.Sleep(5 * time.Second)
-		if err = transcodeToHLS("rtsp", "anon-"+streamPath); err != nil {
-			log.Println(err)
-		}
-	}()
-
 	writer.WriteHeader(http.StatusOK)
 }
 
@@ -655,46 +608,6 @@ func watchJobUntillRunning(ctx context.Context, selector, name string) error {
 			return fmt.Errorf("error watching pods: %v", err)
 		}
 	}
-	return nil
-}
-
-func transcodeToHLS(protocol, streamPath string) error {
-	var port string
-	for mtxPort, supportedProtocol := range portToProtocol {
-		if protocol == supportedProtocol {
-			port = mtxPort
-		}
-	}
-	if len(port) == 0 {
-		return fmt.Errorf("unsupported protocol %s on path %s", protocol, streamPath)
-	}
-	streamURL := protocol + "://localhost:" + port + "/" + streamPath
-
-	// https://trac.ffmpeg.org/wiki/StreamingGuide
-	// https://trac.ffmpeg.org/wiki/Encode/H.264
-	cmd := exec.Command("ffmpeg",
-		"-i", streamURL,
-		"-c:v", "libx264",
-		"-an", // Disable audio
-		"-tune", "zerolatency",
-		"-preset", "veryfast",
-		"-crf", "25", // h.264 constant rate factor (compression ratio) (default: 23)
-		"-f", "hls",
-		"-hls_time", "5", // seconds for each segment
-		"-hls_list_size", "30", // number of segments to keep
-		"-hls_flags", "delete_segments",
-		"hls/"+streamPath+".m3u8")
-	cmd.Stdout = log.Writer()
-	cmd.Stderr = log.Writer()
-
-	err := cmd.Start()
-	if err != nil {
-		return fmt.Errorf("error transcoding video %s: %v", streamPath, err)
-	}
-
-	subprocessesLock.Lock()
-	hlsSubprocessPids[streamPath] = cmd.Process
-	subprocessesLock.Unlock()
 	return nil
 }
 

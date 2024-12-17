@@ -1,4 +1,4 @@
-FROM golang:1.23 AS builder
+FROM golang:1.23-alpine AS builder
 
 WORKDIR /app
 
@@ -9,14 +9,9 @@ COPY . .
 
 RUN go build -o app .
 
-FROM debian:bookworm
+FROM alpine:latest
 
 COPY --from=builder /app/app /app/app
-
-RUN apt-get update && \
-    apt-get install -y ffmpeg && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
