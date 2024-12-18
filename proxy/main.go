@@ -12,7 +12,6 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -142,13 +141,12 @@ func addCamera(writer http.ResponseWriter, request *http.Request) {
 	config.Path = "camera-" + url.PathEscape(data.ID)
 	config.MaxReaders = data.MaxReaders
 	config.Source = data.Source
-	if data.Record {
-		// TODO: run rclone config with the user-provided data
-		config.Record = true
-		// sync the whole directory in case a crash has occured
-		config.RunOnInit = "rclone sync /recordings myconfig:/recordings"
-		config.RunOnRecordSegmentComplete = "rclone sync --min-age=5s /recordings/" + config.Path + " myconfig:/recordings/" + config.Path
-	}
+	config.Record = data.Record
+	// rclone is not necessary, as writing to a PersistentVolume is good enough
+	// if data.Record {
+	// config.RunOnInit = "rclone sync /recordings myconfig:/recordings"  // sync the whole directory in case of a crash
+	// config.RunOnRecordSegmentComplete = "rclone sync --min-age=5s /recordings/" + config.Path + " myconfig:/recordings/" + config.Path
+	// }
 
 	err = sendConfigRequest(config, "localhost")
 	if err != nil {
@@ -185,6 +183,9 @@ func addCamera(writer http.ResponseWriter, request *http.Request) {
 
 	writer.WriteHeader(http.StatusOK)
 }
+
+// fetch all recordings: /v3/recordings/list
+// fetch all recordings for a path: /v3/recordings/get/{name}
 
 func sendConfigRequest(config CameraEndpointConfig, host string) error {
 	var buff bytes.Buffer
@@ -320,6 +321,11 @@ func createMlPipelineDeployment(streamURL, analysisMode, cameraID string) error 
 }
 
 func int32Ptr(i int32) *int32 { return &i }
+
+func updateCameraEndpoint(writer http.ResponseWriter, request *http.Request) {
+	// PATCH /v3/config/paths/patch/{name}
+	writer.WriteHeader(http.StatusOK)
+}
 
 func deleteCameraEndpoint(writer http.ResponseWriter, request *http.Request) {
 	cameraPath := chi.URLParam(request, "path")
@@ -624,7 +630,7 @@ func main() {
 	router.Use(middleware.CleanPath)
 	router.Use(middleware.Heartbeat("/public/ping"))
 	router.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"http://*"},
+		AllowedOrigins:   []string{"*"},
 		AllowedMethods:   []string{"GET", "POST", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Authorization", "Content-Type"},
 		AllowCredentials: false,
@@ -633,17 +639,11 @@ func main() {
 
 	router.Post("/endpoints", addCamera)
 	router.Get("/endpoints", getEndpoints)
+	router.Patch("/endpoints/{path}", updateCameraEndpoint)
 	router.Delete("/endpoints/{path}", deleteCameraEndpoint)
 	router.Post("/analysis/{cameraID}", startAnalysis)
 	router.Delete("/analysis/{cameraID}", stopAnalysis)
 	router.Post("/anonymyze/{path}", anonymyze)
-
-	workingDir, _ := os.Getwd()
-	fs := http.Dir(filepath.Join(workingDir, "hls") + "/")
-
-	router.Route("/static", func(r chi.Router) {
-		r.Get("/*", http.StripPrefix("/static", http.FileServer(fs)).ServeHTTP)
-	})
 
 	server := &http.Server{
 		Addr:              ":8080",
