@@ -65,6 +65,7 @@ type ErrorResponse struct {
 }
 
 var ErrAlreadyExists = stdErrors.New("camera already exists")
+var ErrNotFound = stdErrors.New("camera not found")
 
 var k8sClient *kubernetes.Clientset
 var mtxSourceToPort map[string]string
@@ -106,20 +107,6 @@ func addCamera(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 
-	resp, err := http.Get("http://localhost:9997/v3/paths/list")
-	if err != nil {
-		http.Error(writer, fmt.Sprintf("could not get paths list: %v", err), http.StatusInternalServerError)
-		return
-	}
-	defer resp.Body.Close()
-
-	var pathsResp PathsListResponse
-	err = json.NewDecoder(resp.Body).Decode(&pathsResp)
-	if err != nil {
-		http.Error(writer, fmt.Sprintf("could not read MediaMTX response: %v", err), http.StatusInternalServerError)
-		return
-	}
-
 	parsedSourceURL, err := url.Parse(data.Source)
 	if err != nil {
 		http.Error(writer, fmt.Sprintf("Invalid Source URL %q: %v", data.Source, err), http.StatusBadRequest)
@@ -148,7 +135,7 @@ func addCamera(writer http.ResponseWriter, request *http.Request) {
 	// config.RunOnRecordSegmentComplete = "rclone sync --min-age=5s /recordings/" + config.Path + " myconfig:/recordings/" + config.Path
 	// }
 
-	err = sendConfigRequest(config, "localhost")
+	err = sendConfigRequest(http.MethodPost, "localhost", "/v3/config/paths/add/"+config.Path, config)
 	if err != nil {
 		if stdErrors.Is(err, ErrAlreadyExists) {
 			http.Error(writer, err.Error(), http.StatusConflict)
@@ -168,7 +155,7 @@ func addCamera(writer http.ResponseWriter, request *http.Request) {
 			config.Record = false
 			config.RunOnInit = ""
 
-			err = sendConfigRequest(config, getPodFQDN(hostname, i))
+			err = sendConfigRequest(http.MethodPost, getPodFQDN(hostname, i), "/v3/config/paths/add/"+config.Path, config)
 			if err != nil {
 				if stdErrors.Is(err, ErrAlreadyExists) {
 					http.Error(writer, err.Error(), http.StatusConflict)
@@ -182,27 +169,51 @@ func addCamera(writer http.ResponseWriter, request *http.Request) {
 	}
 
 	writer.WriteHeader(http.StatusOK)
+	writer.Header().Add("X-Instance-Index", currentInstanceIdxStr)
 }
 
-// fetch all recordings: /v3/recordings/list
-// fetch all recordings for a path: /v3/recordings/get/{name}
+func getRecordings(writer http.ResponseWriter, request *http.Request) {
+	// TODO: aggregate recordings from all instances
+	resp, err := http.Get("http://localhost:9997/v3/recordings/list")
+	if err != nil {
+		http.Error(writer, fmt.Sprintf("could not get recordings: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
 
-func sendConfigRequest(config CameraEndpointConfig, host string) error {
-	var buff bytes.Buffer
-	json.NewEncoder(&buff).Encode(config)
+	_, err = io.CopyN(writer, resp.Body, resp.ContentLength)
+	if err != nil {
+		log.Printf("Could not send response to socket: %v\n", err)
+	}
+}
+
+func sendConfigRequest(method, host, path string, body any) error {
+	var req *http.Request
+	if body != nil {
+		var buff bytes.Buffer
+		json.NewEncoder(&buff).Encode(body)
+		req, _ = http.NewRequest(method, "http://"+host+":9997"+path, &buff)
+		req.Header.Add("Content-Type", "application/json")
+	} else {
+		req, _ = http.NewRequest(method, "http://"+host+":9997"+path, nil)
+	}
 
 	log.Println("Sending config request to " + host)
-	res, err := http.Post("http://"+host+":9997/v3/config/paths/add/"+config.Path, "application/json", &buff)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("could not send config request: %v", err)
 	}
-	defer res.Body.Close()
+	defer resp.Body.Close()
 
-	if res.StatusCode/100 != 2 {
+	if resp.StatusCode/100 != 2 {
+		if resp.StatusCode == http.StatusNotFound {
+			return ErrNotFound
+		}
+
 		var respErr ErrorResponse
-		err := json.NewDecoder(res.Body).Decode(&respErr)
+		err := json.NewDecoder(resp.Body).Decode(&respErr)
 		if err != nil {
-			return fmt.Errorf("could not read config response %d body: %v", res.StatusCode, err)
+			return fmt.Errorf("could not read config response %d body: %v", resp.StatusCode, err)
 		}
 		if respErr.Error == "path already exists" {
 			return ErrAlreadyExists
@@ -218,12 +229,12 @@ func getPodFQDN(hostname string, newSuffix int) string {
 }
 
 func getEndpoints(writer http.ResponseWriter, request *http.Request) {
+	// TODO: aggregate endpoints from all instances
 	resp, err := http.Get("http://localhost:9997/v3/paths/list")
 	if err != nil {
 		http.Error(writer, fmt.Sprintf("could not get endpoints: %v", err), http.StatusInternalServerError)
 		return
 	}
-
 	defer resp.Body.Close()
 
 	_, err = io.CopyN(writer, resp.Body, resp.ContentLength)
@@ -323,35 +334,25 @@ func createMlPipelineDeployment(streamURL, analysisMode, cameraID string) error 
 func int32Ptr(i int32) *int32 { return &i }
 
 func updateCameraEndpoint(writer http.ResponseWriter, request *http.Request) {
-	// PATCH /v3/config/paths/patch/{name}
-	writer.WriteHeader(http.StatusOK)
-}
-
-func deleteCameraEndpoint(writer http.ResponseWriter, request *http.Request) {
+	defer request.Body.Close()
 	cameraPath := chi.URLParam(request, "path")
 
-	req, _ := http.NewRequest(http.MethodDelete, "http://localhost:9997/v3/config/paths/delete/"+cameraPath, nil)
-
-	resp, err := http.DefaultClient.Do(req)
+	var data struct {
+		Record bool `json:"record"`
+	}
+	err := json.NewDecoder(request.Body).Decode(&data)
 	if err != nil {
-		http.Error(writer, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusNotFound {
-		http.Error(writer, fmt.Sprintf("camera path %q not found", cameraPath), http.StatusNotFound)
+		http.Error(writer, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
 
-	if resp.StatusCode == http.StatusInternalServerError {
-		var respErr ErrorResponse
-		err := json.NewDecoder(resp.Body).Decode(&respErr)
-		if err != nil {
-			http.Error(writer, fmt.Sprintf("could not read config response body: %v", err), http.StatusInternalServerError)
+	err = sendConfigRequest(http.MethodPatch, "localhost", "/v3/config/paths/patch/"+cameraPath, data)
+	if err != nil {
+		if stdErrors.Is(err, ErrNotFound) {
+			http.Error(writer, fmt.Sprintf("camera path %q not found", cameraPath), http.StatusNotFound)
 			return
 		}
-		http.Error(writer, fmt.Sprintf("config response error: %s", respErr.Error), http.StatusInternalServerError)
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -368,23 +369,46 @@ func deleteCameraEndpoint(writer http.ResponseWriter, request *http.Request) {
 
 	for i := 0; i < int(totalInstances); i++ {
 		if i != currentInstanceIdx {
-			req, _ = http.NewRequest(http.MethodDelete, "http://"+getPodFQDN(hostname, i)+":9997/v3/config/paths/delete/"+cameraPath, nil)
-
-			resp, err = http.DefaultClient.Do(req)
+			err = sendConfigRequest(http.MethodPatch, getPodFQDN(hostname, i), "/v3/config/paths/patch/"+cameraPath, data)
 			if err != nil {
 				http.Error(writer, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			defer resp.Body.Close()
+		}
+	}
 
-			if resp.StatusCode == http.StatusInternalServerError {
-				var respErr ErrorResponse
-				err := json.NewDecoder(resp.Body).Decode(&respErr)
-				if err != nil {
-					http.Error(writer, fmt.Sprintf("could not read config response body: %v", err), http.StatusInternalServerError)
-					return
-				}
-				http.Error(writer, fmt.Sprintf("config response error: %s", respErr.Error), http.StatusInternalServerError)
+	writer.WriteHeader(http.StatusOK)
+}
+
+func deleteCameraEndpoint(writer http.ResponseWriter, request *http.Request) {
+	cameraPath := chi.URLParam(request, "path")
+
+	err := sendConfigRequest(http.MethodDelete, "localhost", "/v3/config/paths/delete/"+cameraPath, nil)
+	if err != nil {
+		if stdErrors.Is(err, ErrNotFound) {
+			http.Error(writer, fmt.Sprintf("camera path %q not found", cameraPath), http.StatusNotFound)
+			return
+		}
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	totalInstances, err := getStatefulSetInstances()
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	hostname := os.Getenv("HOSTNAME")
+
+	currentInstanceIdxStr := hostname[strings.LastIndexByte(hostname, '-')+1:]
+	currentInstanceIdx, _ := strconv.Atoi(currentInstanceIdxStr)
+
+	for i := 0; i < int(totalInstances); i++ {
+		if i != currentInstanceIdx {
+			err = sendConfigRequest(http.MethodDelete, getPodFQDN(hostname, i), "/v3/config/paths/delete/"+cameraPath, nil)
+			if err != nil {
+				http.Error(writer, err.Error(), http.StatusInternalServerError)
 				return
 			}
 		}
@@ -482,7 +506,7 @@ func anonymyze(writer http.ResponseWriter, request *http.Request) {
 	config.Path = "anon-" + streamPath
 	config.Source = "publisher"
 
-	err = sendConfigRequest(config, "localhost")
+	err = sendConfigRequest(http.MethodPost, "localhost", "/v3/config/paths/add/"+config.Path, config)
 	if err != nil {
 		if stdErrors.Is(err, ErrAlreadyExists) {
 			http.Error(writer, err.Error(), http.StatusConflict)
@@ -496,7 +520,7 @@ func anonymyze(writer http.ResponseWriter, request *http.Request) {
 		if i != currentInstanceIdx {
 			config.Source = "rtsp://" + getPodFQDN(hostname, currentInstanceIdx) + ":8554/" + config.Path
 
-			err = sendConfigRequest(config, getPodFQDN(hostname, i))
+			err = sendConfigRequest(http.MethodPost, getPodFQDN(hostname, i), "/v3/config/paths/add/"+config.Path, config)
 			if err != nil {
 				if stdErrors.Is(err, ErrAlreadyExists) {
 					http.Error(writer, err.Error(), http.StatusConflict)
@@ -641,6 +665,7 @@ func main() {
 	router.Get("/endpoints", getEndpoints)
 	router.Patch("/endpoints/{path}", updateCameraEndpoint)
 	router.Delete("/endpoints/{path}", deleteCameraEndpoint)
+	router.Get("/recordings", getRecordings)
 	router.Post("/analysis/{cameraID}", startAnalysis)
 	router.Delete("/analysis/{cameraID}", stopAnalysis)
 	router.Post("/anonymyze/{path}", anonymyze)
